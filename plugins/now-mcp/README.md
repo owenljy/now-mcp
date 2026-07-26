@@ -132,6 +132,29 @@ call, so you can fix it without a crash loop.
 
 ## Tools
 
+### Safe troubleshooting workflow
+
+1. Verify that the mutation record or attachment persisted.
+2. Verify the target filter against the actual record.
+3. Inspect bounded logs/events with `sn_get_runtime_events` (a time bound is mandatory).
+4. Check the downstream observable state.
+5. Invoke underlying logic directly only to isolate dependencies.
+6. State conclusions as **confirmed**, **not observed**, or **inconclusive**.
+
+Table and Attachment API persistence does not prove that Business Rules, flows, events, or
+asynchronous work ran. `sys_trigger` rows are ephemeral, so absence is not proof that work was
+never queued. A missing log phrase only means no matching readable row was found. Directly invoking
+a dependency proves that dependency works in that context; it does not prove the trigger path ran.
+
+For high-volume tables such as `syslog`, default `queryPolicy: "safe"` rejects text searches without
+a bounded `sys_created_on`/`sys_updated_on` predicate. `limit` caps returned rows, not database scan
+cost. Use a narrow window and separate OR terms; use `allow_expensive` only with explicit intent.
+
+For attachments, prefer `filePath` (a path visible to the MCP server process) over base64
+`fileContent`. Exactly one is required. The server reads the file locally and never returns the
+base64 payload. Historical journal values such as `work_notes` may require querying the journal
+table rather than relying on a record's current display value.
+
 ### Data (read & write runtime records)
 | Tool | What it does |
 |---|---|

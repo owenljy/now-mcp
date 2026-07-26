@@ -42,6 +42,13 @@ export const ExecuteBackgroundScriptSchema = z.object({
 		.describe(
 			"Use 'json' when the script's final log line is a JSON object. If it contains success:false or ok:false, the MCP call is marked as an application failure even though the script transport completed.",
 		),
+	mirrorOutputToSystemLog: z
+		.boolean()
+		.optional()
+		.default(false)
+		.describe(
+			'Also write captured output to syslog. Disabled by default to avoid contaminating diagnostics.',
+		),
 });
 
 export type ExecuteBackgroundScriptInput = z.infer<typeof ExecuteBackgroundScriptSchema>;

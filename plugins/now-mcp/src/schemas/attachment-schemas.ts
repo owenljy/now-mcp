@@ -8,22 +8,44 @@ import { instanceField, sysIdField, tableNameField } from './common.js';
 /**
  * Schema for uploading an attachment
  */
-export const UploadAttachmentSchema = z.object({
-	instance: instanceField,
-	fileName: z
-		.string()
-		.min(1, 'File name is required')
-		.max(100, 'File name cannot exceed 100 characters')
-		.refine((name) => !name.includes('..') && !name.includes('/') && !name.includes('\\'), {
-			message: 'File name cannot contain path separators',
-		}),
-	fileContent: z
-		.string()
-		.min(1, 'File content is required')
-		.describe('Base64-encoded file content'),
-	tableName: tableNameField(),
-	recordSysId: sysIdField('record sys_id'),
-});
+export const UploadAttachmentSchema = z
+	.object({
+		instance: instanceField,
+		fileName: z
+			.string()
+			.min(1, 'File name is required')
+			.max(100, 'File name cannot exceed 100 characters')
+			.refine((name) => !name.includes('..') && !name.includes('/') && !name.includes('\\'), {
+				message: 'File name cannot contain path separators',
+			})
+			.optional()
+			.describe('Attachment file name. Inferred from filePath when omitted.'),
+		fileContent: z.string().min(1).optional().describe('Base64-encoded file content'),
+		filePath: z
+			.string()
+			.min(1)
+			.optional()
+			.describe('Path visible to the now-mcp server process. File bytes are read locally.'),
+		tableName: tableNameField(),
+		recordSysId: sysIdField('record sys_id'),
+	})
+	.superRefine((value, ctx) => {
+		const count = Number(value.fileContent !== undefined) + Number(value.filePath !== undefined);
+		if (count !== 1) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: 'Provide exactly one of fileContent or filePath.',
+				path: ['fileContent'],
+			});
+		}
+		if (!value.fileName && !value.filePath) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: 'fileName is required when using fileContent.',
+				path: ['fileName'],
+			});
+		}
+	});
 
 export type UploadAttachmentInput = z.infer<typeof UploadAttachmentSchema>;
 

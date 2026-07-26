@@ -73,6 +73,24 @@ export class AttachmentService {
 		return uploadResponse.result;
 	}
 
+	/** Upload already-decoded bytes. Used by local-path input so base64 never enters tool context. */
+	async uploadAttachmentBuffer(
+		fileName: string,
+		fileBuffer: Buffer,
+		tableName: string,
+		recordSysId: string,
+		instance?: string,
+	): Promise<AttachmentMetadata> {
+		validateWriteAccess(this.instanceManager, instance);
+		validateFileName(fileName);
+		validateTableName(tableName);
+		validateSysId(recordSysId);
+		const response = (await this.instanceManager
+			.getClient(instance)
+			.uploadFile(fileBuffer, fileName, tableName, recordSysId)) as AttachmentUploadResponse;
+		return response.result;
+	}
+
 	/**
 	 * Download an attachment from ServiceNow
 	 * @param attachmentSysId System ID of the attachment

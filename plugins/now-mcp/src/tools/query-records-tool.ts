@@ -10,7 +10,8 @@ import { ServiceNowError } from '../types/errors.js';
 import { toolError } from '../utils/error-handler.js';
 import { zeroResultHints } from '../utils/failure-enrichment.js';
 import { logger } from '../utils/logger.js';
-import { toolResult } from '../utils/tool-response.js';
+import { assessQueryRisk } from '../utils/query-risk.js';
+import { toolResult, toolText } from '../utils/tool-response.js';
 import { truncateRecordFields } from '../utils/value-truncation.js';
 
 /**
@@ -96,6 +97,21 @@ export function createQueryRecordsTool(tableService: TableService, schemaService
 				const validated = QueryRecordsSchema.parse(params);
 				tableName = validated.tableName;
 				instance = validated.instance;
+				const risk = assessQueryRisk(validated.tableName, validated.query);
+				if (validated.queryPolicy === 'safe' && risk.risky) {
+					const blocked = {
+						blocked: true,
+						reason: 'Query blocked by the safe query policy before it was sent to ServiceNow.',
+						table: validated.tableName,
+						reasons: risk.reasons,
+						suggestedQuery: risk.suggestion,
+						hint: "Narrow the time window or set queryPolicy:'allow_expensive' to explicitly accept the scan risk.",
+					};
+					return {
+						content: [{ type: 'text' as const, text: toolText(blocked) }],
+						isError: true as const,
+					};
+				}
 
 				logger.info(`Querying ${validated.tableName}`, {
 					query: validated.query,

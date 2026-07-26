@@ -18,6 +18,13 @@ export const QueryRecordsSchema = z.object({
 	instance: instanceField,
 	tableName: tableNameField(),
 	query: z.string().optional().describe('Encoded query string (e.g., "priority=1^state=2")'),
+	queryPolicy: z
+		.enum(['safe', 'allow_expensive'])
+		.optional()
+		.default('safe')
+		.describe(
+			"Default 'safe' rejects predictably expensive unbounded text scans on high-volume tables. Use allow_expensive only after reviewing scan cost.",
+		),
 	limit: z
 		.number()
 		.int()

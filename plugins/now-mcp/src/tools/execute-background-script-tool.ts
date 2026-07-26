@@ -122,10 +122,13 @@ export function createExecuteBackgroundScriptTool(
 					validated.script,
 					validated.timeout,
 					validated.instance,
+					validated.mirrorOutputToSystemLog,
 				);
 
 				let output = result.output ?? null;
-				let outputTruncated = false;
+				let outputTruncated = result.outputTruncated ?? false;
+				const outputOriginalChars =
+					result.outputOriginalChars ?? (typeof output === 'string' ? output.length : 0);
 				if (typeof output === 'string' && output.length > MAX_OUTPUT_CHARS) {
 					outputTruncated = true;
 					output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n…[truncated ${
@@ -170,6 +173,16 @@ export function createExecuteBackgroundScriptTool(
 					executionTime: result.executionTime,
 					output,
 					...(outputTruncated ? { outputTruncated: true } : {}),
+					outputOriginalChars,
+					outputReturnedChars: typeof output === 'string' ? output.length : 0,
+					...(outputTruncated ? { truncationReason: 'mailbox_limit' as const } : {}),
+					...(result.executionPath === 'sys_trigger'
+						? {
+								queueDelayMs: result.executionTime,
+								timingNote:
+									'Scheduler fallback total time includes mailbox setup, queue delay, polling, and cleanup; execution time cannot be isolated.',
+							}
+						: {}),
 					error: result.error ?? null,
 					instance: validated.instance || 'default',
 					transportConfiguration: scriptService.getExecutionTransportStatus(validated.instance),

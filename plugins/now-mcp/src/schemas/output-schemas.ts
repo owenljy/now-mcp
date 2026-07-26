@@ -173,6 +173,11 @@ export const ExecuteScriptOutputSchema = z.object({
 	output: z.string().nullable().optional(),
 	// True when `output` was shortened to stay under the MCP host's per-call size ceiling.
 	outputTruncated: z.boolean().optional(),
+	outputOriginalChars: z.number().optional(),
+	outputReturnedChars: z.number().optional(),
+	truncationReason: z.literal('mailbox_limit').optional(),
+	queueDelayMs: z.number().optional(),
+	timingNote: z.string().optional(),
 	error: z.string().nullable().optional(),
 	instance: z.string(),
 	transportConfiguration: z
@@ -221,6 +226,8 @@ export const ExecuteScriptOutputSchema = z.object({
 export const UploadAttachmentOutputSchema = z.object({
 	success: z.boolean(),
 	message: z.string(),
+	bytesRead: z.number().optional(),
+	verification: z.enum(['verified', 'not_requested', 'not_supported']).optional(),
 	attachment: OpenRecord,
 });
 

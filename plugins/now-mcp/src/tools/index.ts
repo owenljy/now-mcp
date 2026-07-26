@@ -9,6 +9,7 @@
  * attachments, update sets, and test-data seeding.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -34,6 +35,7 @@ import { createDownloadAttachmentTool } from './download-attachment-tool.js';
 import { createExecuteBackgroundScriptTool } from './execute-background-script-tool.js';
 import { createGetAttachmentMetadataTool } from './get-attachment-metadata-tool.js';
 import { createGetChoiceListTool } from './get-choice-list-tool.js';
+import { createGetRuntimeEventsTool } from './get-runtime-events-tool.js';
 import { createGetSecurityInfoTool } from './get-security-info-tool.js';
 import { createGetTableSchemaTool } from './get-table-schema-tool.js';
 import { createGetTableStructureFromDataTool } from './get-table-structure-from-data-tool.js';
@@ -84,7 +86,8 @@ function withLogging(
 	lowLevelServer: Server,
 ): (args: unknown, extra: unknown) => Promise<ToolResult> {
 	return async (args: unknown): Promise<ToolResult> => {
-		logger.debug(`Tool called: ${name}`, { arguments: args });
+		const operationId = randomUUID();
+		logger.debug(`Tool called: ${name}`, { arguments: args, operationId });
 
 		// Best-effort extraction of the target instance for the structured log.
 		const instance =
@@ -105,8 +108,17 @@ function withLogging(
 				ok,
 				instance,
 			});
-			logger.info(msg, data);
-			return result;
+			logger.info(msg, { ...data, operationId });
+			return {
+				...result,
+				_meta: {
+					instance: instance || 'default',
+					durationMs,
+					operationId,
+					verification: 'not_supported',
+					...(result._meta ?? {}),
+				},
+			};
 		} catch (error) {
 			const durationMs = Date.now() - start;
 			const message = error instanceof Error ? error.message : String(error);
@@ -117,7 +129,7 @@ function withLogging(
 				instance,
 				error: message,
 			});
-			logger.info(msg, data);
+			logger.info(msg, { ...data, operationId });
 			throw error;
 		}
 	};
@@ -162,6 +174,7 @@ export async function registerTools(
 		createDiffRecordsTool(tableService),
 		createGetSecurityInfoTool(tableService),
 		createDiagnoseMutationTool(scriptService),
+		createGetRuntimeEventsTool(tableService),
 
 		// Script execution (with advisory schema pre-flight on referenced fields)
 		createExecuteBackgroundScriptTool(scriptService, schemaService),

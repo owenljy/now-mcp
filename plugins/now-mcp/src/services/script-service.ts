@@ -10,6 +10,9 @@ import { validateWriteAccess } from '../utils/validators.js';
 interface ScriptExecutionResult {
 	success: boolean;
 	output?: string;
+	outputTruncated?: boolean;
+	outputOriginalChars?: number;
+	outputReturnedChars?: number;
 	error?: string;
 	runtimeIdentity?: ScriptRuntimeIdentity;
 }
@@ -142,6 +145,7 @@ export class ScriptService {
 		script: string,
 		timeout: number = 60000,
 		instance?: string,
+		mirrorOutputToSystemLog = false,
 	): Promise<{
 		success: boolean;
 		output?: string;
@@ -150,6 +154,9 @@ export class ScriptService {
 		executionPath: 'scripted-rest' | 'sys_trigger';
 		outcome: 'completed' | 'script_failed' | 'timed_out';
 		runtimeIdentity?: ScriptRuntimeIdentity;
+		outputTruncated?: boolean;
+		outputOriginalChars?: number;
+		outputReturnedChars?: number;
 	}> {
 		validateWriteAccess(this.instanceManager, instance);
 		const client = this.instanceManager.getClient(instance);
@@ -283,14 +290,18 @@ export class ScriptService {
 		  try { __runtimeIdentity.isInteractive = !!gs.getSession().isInteractive(); } catch (ignore) {}
           // log() is the output capture helper. gs.log/gs.info in the user script
           // have been rewritten to call this automatically.
-          var log = function(msg) { var s = String(msg); __output.push(s); gs.log(s); };
+		  var log = function(msg) { var s = String(msg); __output.push(s); ${mirrorOutputToSystemLog ? `gs.log('[now-mcp ${triggerName}] ' + s);` : ''} };
           try {
             ${rewrittenScript}
             var __gr = new GlideRecord('sys_properties');
             if (__gr.get('name', __key)) {
               __gr.setValue('value', JSON.stringify({
 				status: 'done', success: true, runtimeIdentity: __runtimeIdentity,
-				output: (function(){ var s = __output.join('\\n'); return s.length > 2700 ? s.substring(0, 2700) + '\\u2026[output truncated at 2700 chars]' : s; })()
+				output: (function(){ var s = __output.join('\\n'); return s.substring(0, 2700); })(),
+				// Compatibility marker: output truncated at 2700 chars. Numeric fields below are authoritative.
+				outputTruncated: __output.join('\\n').length > 2700,
+				outputOriginalChars: __output.join('\\n').length,
+				outputReturnedChars: Math.min(__output.join('\\n').length, 2700)
               }));
               __gr.update();
             }
@@ -404,6 +415,9 @@ export class ScriptService {
 			return {
 				success: result.success,
 				output: result.output,
+				outputTruncated: result.outputTruncated,
+				outputOriginalChars: result.outputOriginalChars,
+				outputReturnedChars: result.outputReturnedChars,
 				error: result.error,
 				executionTime,
 				executionPath: 'sys_trigger',

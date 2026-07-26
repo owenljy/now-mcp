@@ -70,6 +70,7 @@ const LOCAL_MUTATION: ToolAnnotations = {
 };
 
 export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
+	sn_get_runtime_events: RO,
 	// Reads
 	sn_query_records: RO,
 	sn_aggregate_records: RO,
