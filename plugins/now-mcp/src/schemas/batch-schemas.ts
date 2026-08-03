@@ -79,6 +79,29 @@ export const BatchUpdateSchema = z.object({
 export type BatchUpdateInput = z.infer<typeof BatchUpdateSchema>;
 
 /**
+ * Schema for batch deleting multiple records
+ */
+export const BatchDeleteSchema = z.object({
+	instance: instanceField,
+	tableName: tableNameField(),
+	sysIds: z
+		.array(sysIdField())
+		.min(1, 'At least one sys_id is required')
+		.superRefine(enforceBatchSize)
+		.describe('Array of sys_ids to delete'),
+	verify: z
+		.boolean()
+		.optional()
+		.default(false)
+		.describe(
+			'Read-after-delete check per record (default false — doubles API calls; sn_delete_record defaults true for a single record, but verifying every record in a large batch is expensive).',
+		),
+	continueOnError: continueOnErrorField,
+});
+
+export type BatchDeleteInput = z.infer<typeof BatchDeleteSchema>;
+
+/**
  * Response type for batch operations
  */
 export interface BatchOperationResult {
@@ -90,6 +113,7 @@ export interface BatchOperationResult {
 		success: boolean;
 		sysId?: string;
 		record?: unknown;
+		verified?: boolean;
 		error?: string;
 	}>;
 }

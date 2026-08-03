@@ -97,6 +97,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
 
 	// Destructive / arbitrary code
 	sn_delete_record: { ...DESTRUCTIVE, requiredRoles: ['admin', 'itil'] },
+	sn_batch_delete: { ...DESTRUCTIVE, requiredRoles: ['admin', 'itil'] },
 	sn_execute_background_script: {
 		readOnlyHint: false,
 		destructiveHint: true,

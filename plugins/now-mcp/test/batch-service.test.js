@@ -153,5 +153,69 @@ test('batch operations are blocked on read-only instances', async () => {
     () => svc.batchUpdate('incident', [{ sysId: 'a'.repeat(32), fields: { x: 1 } }], 'partial', true),
     /read-only/i
   );
+  await assert.rejects(
+    () => svc.batchDelete('incident', ['a'.repeat(32)], true, false),
+    /read-only/i
+  );
   assert.equal(client.state.total, 0);
+});
+
+test('batchDelete reports per-record success/failure and does not verify by default', async () => {
+  const sysIds = [Array(32).fill('a').join(''), Array(32).fill('b').join(''), Array(32).fill('c').join('')];
+  const failingSysId = sysIds[1];
+  const custom = {
+    async delete(endpoint) {
+      if (endpoint.includes(failingSysId)) throw new Error('simulated failure');
+      return {};
+    },
+    async get() {
+      return { result: [] };
+    },
+  };
+  const svc = new BatchService(makeManager(custom));
+
+  const result = await svc.batchDelete('incident', sysIds, true, false);
+
+  assert.equal(result.successCount, 2);
+  assert.equal(result.failureCount, 1);
+  assert.equal(result.results[1].success, false);
+  assert.equal(result.results[1].sysId, failingSysId);
+  assert.equal(result.results[0].verified, undefined);
+});
+
+test('batchDelete with verify:true marks a record unverified when the read-after-delete still finds it', async () => {
+  const sysId = 'd'.repeat(32);
+  const custom = {
+    async delete() {
+      return {};
+    },
+    async get() {
+      // Record still readable after delete => verification should fail.
+      return { result: { sys_id: sysId } };
+    },
+  };
+  const svc = new BatchService(makeManager(custom));
+
+  const result = await svc.batchDelete('incident', [sysId], true, true);
+
+  assert.equal(result.results[0].success, true);
+  assert.equal(result.results[0].verified, false);
+});
+
+test('batchDelete with verify:true marks a record verified when the read-after-delete 404s', async () => {
+  const sysId = 'e'.repeat(32);
+  const custom = {
+    async delete() {
+      return {};
+    },
+    async get() {
+      throw new Error('404 Not Found');
+    },
+  };
+  const svc = new BatchService(makeManager(custom));
+
+  const result = await svc.batchDelete('incident', [sysId], true, true);
+
+  assert.equal(result.results[0].success, true);
+  assert.equal(result.results[0].verified, true);
 });

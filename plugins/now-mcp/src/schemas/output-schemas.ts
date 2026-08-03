@@ -101,7 +101,7 @@ export const DeleteRecordOutputSchema = z.object({
 	verification: z.object({ performed: z.boolean(), deleted: z.boolean().optional() }).optional(),
 });
 
-/** Shared batch result envelope (create + update). */
+/** Shared batch result envelope (create + update + delete). */
 export const BatchOutputSchema = z.object({
 	success: z.boolean(),
 	table: z.string(),

@@ -255,6 +255,142 @@ export class BatchService {
 	}
 
 	/**
+	 * Delete multiple records in parallel with controlled concurrency
+	 * @param tableName Name of the table
+	 * @param sysIds Array of sys_ids to delete
+	 * @param continueOnError Whether to continue on individual failures
+	 * @param verify Whether to do a read-after-delete check per record
+	 * @param instance Optional instance name
+	 */
+	async batchDelete(
+		tableName: string,
+		sysIds: string[],
+		continueOnError: boolean = true,
+		verify: boolean = false,
+		instance?: string,
+	): Promise<BatchOperationResult> {
+		validateWriteAccess(this.instanceManager, instance);
+
+		logger.info(`Batch deleting ${sysIds.length} records in ${tableName}`, {
+			instance: instance || 'default',
+			continueOnError,
+			verify,
+		});
+
+		const results: BatchOperationResult['results'] = [];
+		let successCount = 0;
+		let failureCount = 0;
+		const concurrency = batchConcurrency();
+		const delayMs = batchDelayMs();
+
+		// Process in batches to avoid overwhelming the server
+		for (let i = 0; i < sysIds.length; i += concurrency) {
+			const batch = sysIds.slice(i, i + concurrency);
+			const batchStartIndex = i;
+
+			logger.debug(`Processing batch ${Math.floor(i / concurrency) + 1}`, {
+				batchSize: batch.length,
+				startIndex: i,
+			});
+
+			// Create promises for all deletes in this batch
+			const batchPromises = batch.map(async (sysId, batchIndex) => {
+				const globalIndex = batchStartIndex + batchIndex;
+
+				try {
+					await this.tableService.deleteRecord(tableName, sysId, instance);
+
+					// Same read-after-delete check sn_delete_record does for a single
+					// record: treat a 404/"not found" on the follow-up read as confirmed
+					// deletion, otherwise surface it as a verification failure.
+					let verified: boolean | undefined;
+					if (verify) {
+						try {
+							await this.tableService.getRecord(tableName, sysId, ['sys_id'], instance);
+							verified = false;
+						} catch (verifyError) {
+							const text = String(verifyError).toLowerCase();
+							if (
+								text.includes('404') ||
+								text.includes('not found') ||
+								text.includes('no record')
+							) {
+								verified = true;
+							} else {
+								throw verifyError;
+							}
+						}
+					}
+
+					// Echo only the sys_id, not the full row (see batchCreate).
+					results[globalIndex] = {
+						index: globalIndex,
+						success: true,
+						sysId,
+						...(verify ? { verified } : {}),
+					};
+
+					successCount++;
+					return { success: true };
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : String(error);
+
+					results[globalIndex] = {
+						index: globalIndex,
+						success: false,
+						sysId,
+						error: errorMessage,
+					};
+
+					failureCount++;
+
+					logger.warn(`Failed to delete record at index ${globalIndex}`, {
+						error: errorMessage,
+						sysId,
+						tableName,
+					});
+
+					if (!continueOnError) {
+						throw error;
+					}
+
+					return { success: false };
+				}
+			});
+
+			// Wait for all promises in this batch to complete. See batchCreate: with
+			// continueOnError=false we stop before the next batch (the in-flight batch
+			// can't be recalled), bounding the blast radius.
+			await Promise.allSettled(batchPromises);
+
+			if (!continueOnError && failureCount > 0) {
+				logger.warn(`Batch delete stopping after failure (continueOnError=false)`, {
+					processed: i + batch.length,
+					total: sysIds.length,
+				});
+				break;
+			}
+
+			// Small delay between batches to avoid rate limiting
+			if (delayMs > 0 && i + concurrency < sysIds.length) {
+				await this.sleep(delayMs);
+			}
+		}
+
+		logger.info(`Batch delete completed: ${successCount} succeeded, ${failureCount} failed`, {
+			tableName,
+			instance: instance || 'default',
+		});
+
+		return {
+			success: failureCount === 0,
+			successCount,
+			failureCount,
+			results,
+		};
+	}
+
+	/**
 	 * Sleep utility for delays between batches
 	 */
 	private sleep(ms: number): Promise<void> {

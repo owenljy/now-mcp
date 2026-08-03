@@ -25,6 +25,7 @@ import { formatToolCall } from '../utils/tool-log.js';
 import { createAggregateRecordsTool } from './aggregate-records-tool.js';
 import { TOOL_ANNOTATIONS } from './annotations.js';
 import { createBatchCreateTool } from './batch-create-tool.js';
+import { createBatchDeleteTool } from './batch-delete-tool.js';
 import { createBatchUpdateTool } from './batch-update-tool.js';
 import { createConnectionStatusTool, createResetConnectionTool } from './connection-status-tool.js';
 import { createCreateRecordTool } from './create-record-tool.js';
@@ -162,6 +163,7 @@ export async function registerTools(
 		// Batch operations
 		createBatchCreateTool(batchService, schemaService),
 		createBatchUpdateTool(batchService, schemaService),
+		createBatchDeleteTool(batchService),
 
 		// Schema discovery
 		createGetTableSchemaTool(schemaService),
