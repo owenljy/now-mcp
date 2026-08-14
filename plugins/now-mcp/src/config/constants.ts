@@ -12,6 +12,15 @@ export const API_ENDPOINTS = {
 	// Aggregate API (counts, group-by, avg/sum/min/max)
 	STATS: (tableName: string) => `/api/now/stats/${tableName}`,
 
+	// Table Batch API — many Table API calls in one request. Verified present on
+	// a Zurich-era instance; callers fall back to looped single calls on 404/405.
+	BATCH: '/api/now/v1/batch',
+
+	// GraphQL (GlideRecord namespace) — read channel only. Writes stay on the
+	// Table API, which confirms them in its response; a GraphQL mutation can
+	// report success with a null result and needs a re-read to verify.
+	GRAPHQL: '/api/now/graphql',
+
 	// Attachment API
 	ATTACHMENT: '/api/now/attachment',
 	ATTACHMENT_FILE: '/api/now/attachment/file',

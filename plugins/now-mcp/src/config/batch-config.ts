@@ -1,12 +1,17 @@
 /**
  * Batch-operation tunables.
  *
- * None of these are ServiceNow API limits — the batch tools loop single Table
- * API POST/PATCH calls (there is no bulk endpoint), so every number here is a
- * self-imposed guardrail, not a server constraint. They exist to bound three
- * things: the size of the result echoed back into the model context, the blast
- * radius of a single write call, and the request rate (anti-lockout, alongside
- * the RateLimiter/CircuitBreaker).
+ * None of these are ServiceNow API limits — every number here is a self-imposed
+ * guardrail, not a server constraint. They exist to bound three things: the size
+ * of the result echoed back into the model context, the blast radius of a single
+ * write call, and the request rate (anti-lockout, alongside the
+ * RateLimiter/CircuitBreaker).
+ *
+ * `batchConcurrency` now sizes a WAVE rather than a burst of parallel requests:
+ * the batch tools send each wave as one Table Batch API request. It still bounds
+ * the blast radius per round trip and still defines where `continueOnError`
+ * stops, so the semantics carry over — but on the batch-API path it no longer
+ * describes a number of concurrent connections.
  *
  * Each is configurable via env with a sane default, mirroring the pattern used
  * by SERVICENOW_MAX_DOWNLOAD_BYTES / SERVICENOW_AUDIT_LOG_MAX_BYTES. The batch

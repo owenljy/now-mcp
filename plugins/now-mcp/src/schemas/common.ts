@@ -50,6 +50,18 @@ export const updateTypeField = z
 	.describe('partial = PATCH (provided fields only); full = PUT (replace record).');
 
 /**
+ * Acknowledge that a plain Table API insert is the wrong path for this table and
+ * do it anyway. Gates the write-routing guard (see utils/write-routing.ts),
+ * which blocks inserts that would bypass a mandatory platform engine — creating
+ * duplicate CIs, or a request record no workflow ever picks up.
+ */
+export const acknowledgeRoutingRiskField = z
+	.boolean()
+	.optional()
+	.default(false)
+	.describe('Insert directly even though this table has a required purpose-built API.');
+
+/**
  * Batch failure policy. true (default): finish remaining records after a
  * failure; false: stop before the next wave (records already dispatched in the
  * current wave still complete).

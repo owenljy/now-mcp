@@ -2,6 +2,7 @@
  * ServiceNow HTTP client for all API interactions (native fetch, no axios).
  */
 
+import { randomUUID } from 'node:crypto';
 import { API_ENDPOINTS, HTTP_CONFIG } from '../config/constants.js';
 import { CircuitOpenError, HttpError, NetworkError } from '../types/errors.js';
 import type { AuthConfig } from '../types/instance.js';
@@ -13,6 +14,13 @@ import {
 } from '../utils/circuit-breaker.js';
 import { isRetryableError, transformError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
+import {
+	type BatchOutcome,
+	type BatchSubRequest,
+	buildBatchPayload,
+	isMutatingMethod,
+	parseBatchResponse,
+} from '../utils/native-batch.js';
 import { RateLimiter } from '../utils/rate-limiter.js';
 import {
 	type OAuthConfig as AuthOAuthConfig,
@@ -278,6 +286,29 @@ export class ServiceNowClient {
 	async delete<T>(endpoint: string): Promise<T> {
 		recordWrite('DELETE', endpoint, this.instanceUrl);
 		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'DELETE' }));
+	}
+
+	/**
+	 * Executes many Table API calls in a single request via the Table Batch API.
+	 *
+	 * Audit is recorded per LOGICAL write rather than once for the envelope: a
+	 * single `POST /api/now/v1/batch` line would hide which records this server
+	 * actually changed, defeating the point of the trail. The envelope POST
+	 * itself is therefore sent through doFetch directly instead of post().
+	 */
+	async batch(requests: BatchSubRequest[]): Promise<BatchOutcome> {
+		for (const request of requests) {
+			if (isMutatingMethod(request.method)) {
+				recordWrite(request.method, request.url, this.instanceUrl);
+			}
+		}
+
+		const payload = buildBatchPayload(randomUUID(), requests);
+		const raw = await this.requestWithRetry<unknown>(() =>
+			this.doFetch<unknown>(API_ENDPOINTS.BATCH, { method: 'POST', body: payload }),
+		);
+
+		return parseBatchResponse(raw, requests);
 	}
 
 	/**

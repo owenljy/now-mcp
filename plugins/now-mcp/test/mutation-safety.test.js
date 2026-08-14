@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { createDeleteRecordTool } from '../build/tools/delete-record-tool.js';
+import { createDeleteRecordsTool } from '../build/tools/delete-records-tool.js';
 import { createDiagnoseMutationTool } from '../build/tools/diagnose-mutation-tool.js';
 import { EXECUTE_BACKGROUND_SCRIPT_TOOL, createExecuteBackgroundScriptTool } from '../build/tools/execute-background-script-tool.js';
-import { DELETE_RECORD_TOOL } from '../build/tools/delete-record-tool.js';
+import { DELETE_RECORDS_TOOL } from '../build/tools/delete-records-tool.js';
 import { createUpdateRecordTool } from '../build/tools/update-record-tool.js';
 
 test('tool descriptions route ordinary deletion to the dedicated delete tool first', () => {
-	assert.match(DELETE_RECORD_TOOL.description, /FIRST and preferred tool/i);
-	assert.match(DELETE_RECORD_TOOL.description, /before attempting GlideRecord\.deleteRecord/);
-	assert.match(EXECUTE_BACKGROUND_SCRIPT_TOOL.description, /call sn_delete_record FIRST/);
+	assert.match(DELETE_RECORDS_TOOL.description, /FIRST and preferred tool/i);
+	assert.match(DELETE_RECORDS_TOOL.description, /before reaching for GlideRecord\.deleteRecord/);
+	assert.match(EXECUTE_BACKGROUND_SCRIPT_TOOL.description, /call sn_delete_records FIRST/);
 });
 
 test('background script reports application outcome false as an error', async () => {
@@ -61,14 +61,31 @@ test('update verification fails when persisted value differs', async () => {
 	assert.equal(res.structuredContent.recommendedTool, 'sn_diagnose_mutation');
 });
 
-test('delete verification fails when record still exists', async () => {
-	const service = {
-		async deleteRecord() { return { success: true, message: 'deleted' }; },
-		async getRecord() { return { sys_id: 'a'.repeat(32) }; },
+test('delete surfaces a record that survived verification as a failure', async () => {
+	// The verification itself is BatchService's job (see batch-service.test.js);
+	// here we assert the tool does not launder a failed entry into a success.
+	const batchService = {
+		async batchDelete(table, sysIds) {
+			return {
+				success: false,
+				successCount: 0,
+				failureCount: 1,
+				results: [{
+					index: 0,
+					success: false,
+					sysId: sysIds[0],
+					verified: false,
+					error: 'Delete returned success, but the record still exists.',
+				}],
+			};
+		},
 	};
-	const res = await createDeleteRecordTool(service).handler({ tableName: 'incident', sysId: 'a'.repeat(32), verify: true });
-	assert.equal(res.isError, true);
-	assert.equal(res.structuredContent.verification.deleted, false);
+	const res = await createDeleteRecordsTool(batchService).handler({
+		tableName: 'incident', sysIds: ['a'.repeat(32)], verify: true,
+	});
+	assert.equal(res.structuredContent.success, false);
+	assert.equal(res.structuredContent.summary.failureCount, 1);
+	assert.equal(res.structuredContent.results[0].verified, false);
 });
 
 test('mutation diagnostic parses the final JSON log line', async () => {

@@ -152,19 +152,69 @@ cost. Use a narrow window and separate OR terms; use `allow_expensive` only with
 
 For attachments, prefer `filePath` (a path visible to the MCP server process) over base64
 `fileContent`. Exactly one is required. The server reads the file locally and never returns the
-base64 payload. Historical journal values such as `work_notes` may require querying the journal
-table rather than relying on a record's current display value.
+base64 payload. Historical journal values such as `work_notes` do **not** need `sys_journal_field`
+(which non-admins cannot read anyway): requesting the journal column with `displayValue: "all"`
+returns the full entry stream with timestamps and authors.
 
 ### Data (read & write runtime records)
 | Tool | What it does |
 |---|---|
-| `sn_query_records` | Read any table — encoded-query filters, field selection, **dot-walking**, pagination, display values; on MCP auth/transport failure, automatically tries an aligned `now-sdk query` profile |
+| `sn_query_records` | Read any table — encoded-query filters, field selection, **dot-walking**, pagination, display values, and `expand` for nested reference fields in one round trip; field names are checked before the query is sent; on MCP auth/transport failure, automatically tries an aligned `now-sdk query` profile |
 | `sn_aggregate_records` | Counts / group-by / avg / sum / min / max via the **Stats API** (server-side, cheap) |
-| `sn_create_record` | Insert a record (with schema field validation + typo hints) |
+| `sn_create_record` | Insert a record (with schema field validation + typo hints, and write-routing guards) |
 | `sn_update_record` | Patch/replace a record by sys_id; verifies persistence by default and classifies silent non-persistence |
-| `sn_delete_record` | Delete a record by sys_id (destructive); verifies deletion by default |
-| `sn_batch_create` / `sn_batch_update` | Create/update many records in concurrency-limited waves (default 50/call, rate-limited; not transactional) |
+| `sn_delete_records` | Delete **one or many** records by sys_id (destructive); verifies deletion by default in a single extra request |
+| `sn_batch_create` / `sn_batch_update` | Create/update many records via the **Table Batch API** — one request per wave of 25 (default 50/call; not transactional) |
 | `sn_diff_records` | Compare two records on a table field-by-field; returns only what differs |
+
+`sn_delete_records` is one tool for both cardinalities — the underlying Table API
+call is identical whether you pass one sys_id or fifty, so cardinality is data
+rather than a different operation.
+
+#### Failures ServiceNow does not report
+
+Three behaviours return HTTP 200 and no error while giving you the wrong answer.
+Each is handled where it happens rather than left to the caller to notice:
+
+- **An unknown field in an encoded query is silently ignored**, dropping that
+  condition. Measured on a live instance: `priority=1` matched 27 incidents,
+  `priorityy=1` matched all 67. `sn_query_records` and `sn_aggregate_records`
+  check field names (in `query`, `fields`, `groupBy`, `*Fields`) against the table
+  schema first and report the typo with a suggestion. Pass
+  `skipFieldValidation: true` to run a query as written. This is GlideRecord
+  behaviour, not Table-API-specific — GraphQL resolves an unknown field to `null`
+  with an empty `errors` array, so no transport change avoids it.
+- **Journal fields read back empty.** `comments` / `work_notes` put the entry
+  stream (timestamps, authors, text) in `display_value` and leave `value` as `""`,
+  so the default `displayValue: false` makes a record with nine comments look like
+  it has none. Requesting a journal field without a display value returns a
+  warning saying so; use `displayValue: "all"`.
+- **Inserts that bypass a required engine still return 201.** A direct
+  `cmdb_ci_*` insert skips Identification and Reconciliation and creates duplicate
+  CIs; a direct `sc_request` / `sc_req_item` insert produces a request no workflow
+  picks up. Those inserts are blocked with the correct API named
+  (`/api/now/identifyreconcile`, `/api/sn_sc/servicecatalog/…`); pass
+  `acknowledgeRoutingRisk: true` to insert anyway. Routing is decided by actual
+  table inheritance, not the name prefix — `cmdb_ci_outage` and the
+  `cmdb_ci_m2m_*` join tables carry the prefix without extending `cmdb_ci`, and
+  inserting them is ordinary work.
+
+#### Transports
+
+Reads and writes go over the REST Table/Stats/Attachment APIs. Two additions:
+
+- **Table Batch API** (`/api/now/v1/batch`) carries a whole wave of batch
+  create/update/delete calls in one request instead of one request per record.
+  Instances without the endpoint fall back to the original looped path
+  automatically (decided before anything is written, so nothing double-applies).
+- **GraphQL** (`/api/now/graphql`) backs `expand` only. It is an internal
+  transport, not a tool: raw GraphQL would hand the model a surface where errors
+  arrive as HTTP 200 with an `errors` array, where the schema spans ~6,200 tables
+  with introspection disabled by default, and where an unknown field resolves to
+  `null` silently. What it buys is a true total row count independent of
+  pagination and per-field control over value vs. display value. **Writes stay on
+  REST** — a GraphQL mutation can report success with a null result and needs a
+  re-read to confirm, which is strictly worse than the REST response.
 
 ### Schema discovery
 | Tool | What it does |
@@ -334,11 +384,14 @@ to pin the YAML's own `default` instead.
 
 - **Read-only by default.** Every instance is read-only unless you explicitly set
   `readOnly: false`. Write tools return a clear `AccessDeniedError` otherwise.
-- **Verified mutations.** `sn_update_record` and `sn_delete_record` reread state
+- **Verified mutations.** `sn_update_record` and `sn_delete_records` reread state
   by default and fail when the requested mutation did not persist. Pass
   `verify: false` only when the caller explicitly accepts weaker assurance.
   Verification failures return `failureType: "mutation_not_persisted"` and
-  recommend `sn_diagnose_mutation`.
+  recommend `sn_diagnose_mutation`. Delete verification is batched into a single
+  extra request regardless of how many records were deleted, so a record the API
+  claimed to delete but which still exists is reported as a **failure** rather
+  than a success with a flag on it.
 - **ACL-aware diagnosis.** `sn_diagnose_mutation` maps record update to the
   ServiceNow `write` ACL operation and inspects exact, inherited, field, and
   wildcard coverage. No visible effective ACL is reported as

@@ -49,6 +49,13 @@ export const QueryRecordsOutputSchema = z.object({
 		totalMatching: z.number().optional(),
 	}),
 	hints: z.unknown().optional(),
+	// Conditions that make the returned rows misleading rather than wrong — e.g.
+	// journal fields read without displayValue, or an `expand` that had to fall
+	// back to dot-walking. Present only when something needs saying.
+	warnings: z.array(z.string()).optional(),
+	// Which transport served the read: 'table-api' or 'graphql' (set when expand
+	// was used).
+	transport: z.string().optional(),
 });
 
 /** sn_aggregate_records */
@@ -90,15 +97,25 @@ export const UpdateRecordOutputSchema = z.object({
 		.optional(),
 });
 
-/** sn_delete_record */
-export const DeleteRecordOutputSchema = z.object({
+/**
+ * sn_delete_records — one envelope for one or many records, so the caller reads
+ * the same shape regardless of how many sys_ids were passed.
+ *
+ * Each entry in `results` carries `verified` when verify was on: false means the
+ * delete reported success but the record read back, in which case the entry is
+ * also marked unsuccessful.
+ */
+export const DeleteRecordsOutputSchema = z.object({
 	success: z.boolean(),
-	message: z.string().optional(),
-	tableName: z.string(),
-	sysId: z.string(),
+	table: z.string(),
 	instance: z.string(),
+	summary: z.object({
+		total: z.number(),
+		successCount: z.number(),
+		failureCount: z.number(),
+	}),
+	results: z.array(OpenRecord),
 	warning: z.string().optional(),
-	verification: z.object({ performed: z.boolean(), deleted: z.boolean().optional() }).optional(),
 });
 
 /** Shared batch result envelope (create + update + delete). */

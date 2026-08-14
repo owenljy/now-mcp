@@ -16,6 +16,7 @@ import { z } from 'zod';
 import type { InstanceManager } from '../client/instance-manager.js';
 import { AttachmentService } from '../services/attachment-service.js';
 import { BatchService } from '../services/batch-service.js';
+import { GraphqlService } from '../services/graphql-service.js';
 import { SchemaService } from '../services/schema-service.js';
 import { ScriptService } from '../services/script-service.js';
 import { TableService } from '../services/table-service.js';
@@ -25,11 +26,10 @@ import { formatToolCall } from '../utils/tool-log.js';
 import { createAggregateRecordsTool } from './aggregate-records-tool.js';
 import { TOOL_ANNOTATIONS } from './annotations.js';
 import { createBatchCreateTool } from './batch-create-tool.js';
-import { createBatchDeleteTool } from './batch-delete-tool.js';
 import { createBatchUpdateTool } from './batch-update-tool.js';
 import { createConnectionStatusTool, createResetConnectionTool } from './connection-status-tool.js';
 import { createCreateRecordTool } from './create-record-tool.js';
-import { createDeleteRecordTool } from './delete-record-tool.js';
+import { createDeleteRecordsTool } from './delete-records-tool.js';
 import { createDiagnoseMutationTool } from './diagnose-mutation-tool.js';
 import { createDiffRecordsTool } from './diff-records-tool.js';
 import { createDownloadAttachmentTool } from './download-attachment-tool.js';
@@ -151,19 +151,25 @@ export async function registerTools(
 	const scriptService = new ScriptService(instanceManager);
 	const batchService = new BatchService(instanceManager);
 	const schemaService = new SchemaService(instanceManager);
+	// Read-only GraphQL transport, used by sn_query_records for `expand`. Not a
+	// tool of its own — see services/graphql-service.ts for why raw GraphQL is
+	// deliberately not exposed.
+	const graphqlService = new GraphqlService(instanceManager);
 
 	const tools: ToolDescriptor[] = [
 		// Table operations (runtime data)
-		createQueryRecordsTool(tableService, schemaService),
-		createAggregateRecordsTool(tableService),
+		createQueryRecordsTool(tableService, schemaService, graphqlService),
+		createAggregateRecordsTool(tableService, schemaService),
 		createCreateRecordTool(tableService, schemaService),
 		createUpdateRecordTool(tableService, schemaService),
-		createDeleteRecordTool(tableService),
+		// One tool for one record or many: cardinality is data, not a different
+		// operation. Deletes route through BatchService so a single delete and a
+		// fifty-record delete share the same verification path.
+		createDeleteRecordsTool(batchService),
 
 		// Batch operations
 		createBatchCreateTool(batchService, schemaService),
 		createBatchUpdateTool(batchService, schemaService),
-		createBatchDeleteTool(batchService),
 
 		// Schema discovery
 		createGetTableSchemaTool(schemaService),

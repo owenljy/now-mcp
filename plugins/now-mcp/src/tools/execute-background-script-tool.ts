@@ -25,7 +25,7 @@ export const EXECUTE_BACKGROUND_SCRIPT_TOOL = {
 	name: 'sn_execute_background_script',
 	title: 'Execute background script',
 	description: `What: Run server-side JavaScript in ServiceNow using the instance's configured execution transport: scriptApiPath when set, otherwise a temporary sys_trigger, then return logged output.
-When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for plain reads and the create/update/delete record tools for ordinary CRUD. In particular, to remove one known record, call sn_delete_record FIRST; do not substitute GlideRecord.deleteRecord() merely because this tool is more general.
+When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for plain reads and the create/update/delete record tools for ordinary CRUD. In particular, to remove known records, call sn_delete_records FIRST; do not substitute GlideRecord.deleteRecord() merely because this tool is more general.
 Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the configured Scripted REST resource must be installed, active, and executable by the integration user. Without scriptApiPath, the integration user must be able to create/read/delete the temporary sys_properties and sys_trigger records. Timeout default 60s, max 2m.
 
 WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only: it does not grant roles, bypass ACLs, or repair a missing Scripted REST endpoint. Runtime identity/privileges are determined by the configured ServiceNow endpoint or scheduled-job context.

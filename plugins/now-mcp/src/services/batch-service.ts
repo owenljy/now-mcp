@@ -1,14 +1,48 @@
 /**
- * Batch operations service for bulk create/update operations
+ * Batch operations service for bulk create/update/delete.
+ *
+ * Transport: the Table Batch API (`/api/now/v1/batch`) sends one wave of
+ * records as ONE HTTP request instead of one request per record. Waves are still
+ * sized by `batchConcurrency()`, which keeps the documented `continueOnError`
+ * contract intact — a failure stops the next wave, and only records already
+ * dispatched in the current wave complete.
+ *
+ * Instances without the batch endpoint (404/405) fall back to the original
+ * looped path. The fallback is decided on the FIRST wave, before anything has
+ * been written, so restarting from scratch cannot double-apply a write.
+ *
+ * Still not transactional: the batch endpoint executes sub-requests
+ * independently and reports a status per sub-request. A partial failure leaves
+ * the successful records applied, exactly as the looped path did.
  */
 
 import type { InstanceManager } from '../client/instance-manager.js';
 import { batchConcurrency, batchDelayMs } from '../config/batch-config.js';
+import { API_ENDPOINTS } from '../config/constants.js';
 import type { BatchOperationResult } from '../schemas/batch-schemas.js';
 import type { RecordData, ServiceNowRecord } from '../types/servicenow.js';
 import { logger } from '../utils/logger.js';
+import {
+	type BatchSubRequest,
+	type BatchSubResponse,
+	isBatchEndpointUnavailable,
+} from '../utils/native-batch.js';
 import { validateWriteAccess } from '../utils/validators.js';
 import { TableService } from './table-service.js';
+
+/** One entry of a batch result, before counting. */
+type ResultEntry = BatchOperationResult['results'][number];
+
+/**
+ * Per-instance memo of whether the batch endpoint exists, so an instance that
+ * lacks it is probed once per process rather than on every batch call.
+ */
+const batchEndpointAvailable = new Map<string, boolean>();
+
+/** Exported for tests: forget what we learned about endpoint availability. */
+export function resetBatchEndpointCache(): void {
+	batchEndpointAvailable.clear();
+}
 
 export class BatchService {
 	private tableService: TableService;
@@ -20,7 +54,121 @@ export class BatchService {
 	}
 
 	/**
-	 * Create multiple records in parallel with controlled concurrency
+	 * Run `items` through the native batch endpoint in waves, mapping each item
+	 * to one sub-request and each sub-response back to a result entry.
+	 *
+	 * Returns null when the endpoint turns out to be unavailable on the first
+	 * wave — the signal for the caller to use its looped fallback. Any later
+	 * failure is a real error and propagates.
+	 */
+	private async runWaves<T>(
+		items: T[],
+		instanceName: string,
+		toRequest: (item: T, index: number) => BatchSubRequest,
+		interpret: (item: T, index: number, response: BatchSubResponse | undefined) => ResultEntry,
+		continueOnError: boolean,
+		instance?: string,
+	): Promise<BatchOperationResult | null> {
+		if (batchEndpointAvailable.get(instanceName) === false) return null;
+
+		const client = this.instanceManager.getClient(instance);
+		const concurrency = batchConcurrency();
+		const delayMs = batchDelayMs();
+
+		const results: ResultEntry[] = [];
+		let successCount = 0;
+		let failureCount = 0;
+
+		for (let i = 0; i < items.length; i += concurrency) {
+			const wave = items.slice(i, i + concurrency);
+			const requests = wave.map((item, offset) => toRequest(item, i + offset));
+
+			let outcome: Awaited<ReturnType<typeof client.batch>>;
+			try {
+				outcome = await client.batch(requests);
+			} catch (error) {
+				// Endpoint absent: nothing in this wave ran. Only safe to report on the
+				// very first wave — after that, earlier waves are already applied and
+				// restarting would re-apply them.
+				if (i === 0 && isBatchEndpointUnavailable(error)) {
+					batchEndpointAvailable.set(instanceName, false);
+					logger.info('Table Batch API unavailable — using looped single calls', {
+						instance: instanceName,
+					});
+					return null;
+				}
+				throw error;
+			}
+
+			batchEndpointAvailable.set(instanceName, true);
+
+			for (const [offset, item] of wave.entries()) {
+				const index = i + offset;
+				const entry = interpret(item, index, outcome.responses.get(requests[offset].id));
+				results[index] = entry;
+				if (entry.success) successCount++;
+				else failureCount++;
+			}
+
+			if (!continueOnError && failureCount > 0) {
+				logger.warn('Batch stopping after failure (continueOnError=false)', {
+					processed: i + wave.length,
+					total: items.length,
+				});
+				break;
+			}
+
+			if (delayMs > 0 && i + concurrency < items.length) {
+				await this.sleep(delayMs);
+			}
+		}
+
+		return { success: failureCount === 0, successCount, failureCount, results };
+	}
+
+	/**
+	 * Turn a sub-response into a result entry. `undefined` means the sub-request
+	 * was never serviced, which must read as a failure — treating a missing
+	 * response as success is precisely how a malformed batch envelope would look
+	 * like a silent no-op.
+	 */
+	private static entryFor(
+		index: number,
+		response: BatchSubResponse | undefined,
+		sysIdFrom: (body: unknown) => string | undefined,
+		fallbackSysId?: string,
+	): ResultEntry {
+		if (!response) {
+			return {
+				index,
+				success: false,
+				...(fallbackSysId ? { sysId: fallbackSysId } : {}),
+				error: 'Not serviced by the batch request.',
+			};
+		}
+		if (response.statusCode >= 400) {
+			return {
+				index,
+				success: false,
+				...(fallbackSysId ? { sysId: fallbackSysId } : {}),
+				error: response.error ?? `HTTP ${response.statusCode}`,
+			};
+		}
+		// Echo only the sys_id, not the full row: on a large batch the rows are a
+		// big payload that then persists in the model's context, while the sys_id is
+		// the actionable handle — re-read specific rows with sn_query_records.
+		const sysId = sysIdFrom(response.body) ?? fallbackSysId;
+		return { index, success: true, ...(sysId ? { sysId } : {}) };
+	}
+
+	/** Pull sys_id out of a Table API single-record response body. */
+	private static sysIdOfResult(body: unknown): string | undefined {
+		const result = (body as { result?: { sys_id?: unknown } } | undefined)?.result;
+		return typeof result?.sys_id === 'string' ? result.sys_id : undefined;
+	}
+
+	/**
+	 * Create multiple records
 	 * @param tableName Name of the table
 	 * @param records Array of record data objects
 	 * @param continueOnError Whether to continue on individual failures
@@ -34,108 +182,52 @@ export class BatchService {
 	): Promise<BatchOperationResult> {
 		validateWriteAccess(this.instanceManager, instance);
 
+		const resolved = this.instanceManager.resolveInstance(instance);
 		logger.info(`Batch creating ${records.length} records in ${tableName}`, {
-			instance: instance || 'default',
+			instance: resolved.name,
 			continueOnError,
 		});
 
-		const results: BatchOperationResult['results'] = [];
-		let successCount = 0;
-		let failureCount = 0;
-		const concurrency = batchConcurrency();
-		const delayMs = batchDelayMs();
-
-		// Process in batches to avoid overwhelming the server
-		for (let i = 0; i < records.length; i += concurrency) {
-			const batch = records.slice(i, i + concurrency);
-			const batchStartIndex = i;
-
-			logger.debug(`Processing batch ${Math.floor(i / concurrency) + 1}`, {
-				batchSize: batch.length,
-				startIndex: i,
-			});
-
-			// Create promises for all records in this batch
-			const batchPromises = batch.map(async (recordData, batchIndex) => {
-				const globalIndex = batchStartIndex + batchIndex;
-
-				try {
-					const record = await this.tableService.createRecord<ServiceNowRecord>(
-						tableName,
-						recordData,
-						instance,
-					);
-
-					// Echo only the sys_id, not the full row. On a large batch the full
-					// rows are a big payload that persists in context; the sys_id is the
-					// actionable handle — re-read specific rows with query_records.
-					results[globalIndex] = {
-						index: globalIndex,
-						success: true,
-						sysId: record.sys_id,
-					};
-
-					successCount++;
-					return { success: true };
-				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error);
-
-					results[globalIndex] = {
-						index: globalIndex,
-						success: false,
-						error: errorMessage,
-					};
-
-					failureCount++;
-
-					logger.warn(`Failed to create record at index ${globalIndex}`, {
-						error: errorMessage,
-						tableName,
-					});
-
-					if (!continueOnError) {
-						throw error;
-					}
-
-					return { success: false };
-				}
-			});
-
-			// Wait for all promises in this batch to complete. The records in THIS
-			// batch were already dispatched concurrently and can't be recalled; with
-			// continueOnError=false we stop *before scheduling the next batch* so the
-			// blast radius is bounded to the in-flight batch rather than every record.
-			await Promise.allSettled(batchPromises);
-
-			if (!continueOnError && failureCount > 0) {
-				logger.warn(`Batch create stopping after failure (continueOnError=false)`, {
-					processed: i + batch.length,
-					total: records.length,
-				});
-				break;
-			}
-
-			// Small delay between batches to avoid rate limiting
-			if (delayMs > 0 && i + concurrency < records.length) {
-				await this.sleep(delayMs);
-			}
+		const native = await this.runWaves(
+			records,
+			resolved.name,
+			(data, index) => ({
+				id: `c${index}`,
+				method: 'POST',
+				// Same reference-link stripping as the single-record create path.
+				url: `${API_ENDPOINTS.TABLE_RECORD(tableName)}?sysparm_exclude_reference_link=true`,
+				body: data,
+			}),
+			(_data, index, response) =>
+				BatchService.entryFor(index, response, BatchService.sysIdOfResult),
+			continueOnError,
+			instance,
+		);
+		if (native) {
+			logger.info(
+				`Batch create completed: ${native.successCount} succeeded, ${native.failureCount} failed`,
+				{ tableName, instance: resolved.name, transport: 'batch-api' },
+			);
+			return native;
 		}
 
-		logger.info(`Batch create completed: ${successCount} succeeded, ${failureCount} failed`, {
-			tableName,
-			instance: instance || 'default',
-		});
-
-		return {
-			success: failureCount === 0,
-			successCount,
-			failureCount,
-			results,
-		};
+		return this.loopedWaves(
+			records,
+			continueOnError,
+			async (data, index) => {
+				const record = await this.tableService.createRecord<ServiceNowRecord>(
+					tableName,
+					data,
+					instance,
+				);
+				return { index, success: true, sysId: record.sys_id };
+			},
+			(_data, index, message) => ({ index, success: false, error: message }),
+		);
 	}
 
 	/**
-	 * Update multiple records in parallel with controlled concurrency
+	 * Update multiple records
 	 * @param tableName Name of the table
 	 * @param updates Array of update objects with sysId and fields
 	 * @param updateType Type of update (partial or full)
@@ -151,111 +243,59 @@ export class BatchService {
 	): Promise<BatchOperationResult> {
 		validateWriteAccess(this.instanceManager, instance);
 
+		const resolved = this.instanceManager.resolveInstance(instance);
 		logger.info(`Batch updating ${updates.length} records in ${tableName}`, {
-			instance: instance || 'default',
+			instance: resolved.name,
 			updateType,
 			continueOnError,
 		});
 
-		const results: BatchOperationResult['results'] = [];
-		let successCount = 0;
-		let failureCount = 0;
-		const concurrency = batchConcurrency();
-		const delayMs = batchDelayMs();
-
-		// Process in batches to avoid overwhelming the server
-		for (let i = 0; i < updates.length; i += concurrency) {
-			const batch = updates.slice(i, i + concurrency);
-			const batchStartIndex = i;
-
-			logger.debug(`Processing batch ${Math.floor(i / concurrency) + 1}`, {
-				batchSize: batch.length,
-				startIndex: i,
-			});
-
-			// Create promises for all updates in this batch
-			const batchPromises = batch.map(async (update, batchIndex) => {
-				const globalIndex = batchStartIndex + batchIndex;
-
-				try {
-					const record = await this.tableService.updateRecord<ServiceNowRecord>(
-						tableName,
-						update.sysId,
-						update.fields,
-						updateType === 'full',
-						instance,
-					);
-
-					// Echo only the sys_id, not the full row (see batchCreate) — keeps a
-					// large batch result small in context.
-					results[globalIndex] = {
-						index: globalIndex,
-						success: true,
-						sysId: record.sys_id,
-					};
-
-					successCount++;
-					return { success: true };
-				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error);
-
-					results[globalIndex] = {
-						index: globalIndex,
-						success: false,
-						sysId: update.sysId,
-						error: errorMessage,
-					};
-
-					failureCount++;
-
-					logger.warn(`Failed to update record at index ${globalIndex}`, {
-						error: errorMessage,
-						sysId: update.sysId,
-						tableName,
-					});
-
-					if (!continueOnError) {
-						throw error;
-					}
-
-					return { success: false };
-				}
-			});
-
-			// Wait for all promises in this batch to complete. See batchCreate: with
-			// continueOnError=false we stop before the next batch (the in-flight batch
-			// can't be recalled), bounding the blast radius.
-			await Promise.allSettled(batchPromises);
-
-			if (!continueOnError && failureCount > 0) {
-				logger.warn(`Batch update stopping after failure (continueOnError=false)`, {
-					processed: i + batch.length,
-					total: updates.length,
-				});
-				break;
-			}
-
-			// Small delay between batches to avoid rate limiting
-			if (delayMs > 0 && i + concurrency < updates.length) {
-				await this.sleep(delayMs);
-			}
+		const native = await this.runWaves(
+			updates,
+			resolved.name,
+			(update, index) => ({
+				id: `u${index}`,
+				method: updateType === 'full' ? 'PUT' : 'PATCH',
+				url: `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, update.sysId)}?sysparm_exclude_reference_link=true`,
+				body: update.fields,
+			}),
+			(update, index, response) =>
+				BatchService.entryFor(index, response, BatchService.sysIdOfResult, update.sysId),
+			continueOnError,
+			instance,
+		);
+		if (native) {
+			logger.info(
+				`Batch update completed: ${native.successCount} succeeded, ${native.failureCount} failed`,
+				{ tableName, instance: resolved.name, transport: 'batch-api' },
+			);
+			return native;
 		}
 
-		logger.info(`Batch update completed: ${successCount} succeeded, ${failureCount} failed`, {
-			tableName,
-			instance: instance || 'default',
-		});
-
-		return {
-			success: failureCount === 0,
-			successCount,
-			failureCount,
-			results,
-		};
+		return this.loopedWaves(
+			updates,
+			continueOnError,
+			async (update, index) => {
+				const record = await this.tableService.updateRecord<ServiceNowRecord>(
+					tableName,
+					update.sysId,
+					update.fields,
+					updateType === 'full',
+					instance,
+				);
+				return { index, success: true, sysId: record.sys_id };
+			},
+			(update, index, message) => ({
+				index,
+				success: false,
+				sysId: update.sysId,
+				error: message,
+			}),
+		);
 	}
 
 	/**
-	 * Delete multiple records in parallel with controlled concurrency
+	 * Delete multiple records
 	 * @param tableName Name of the table
 	 * @param sysIds Array of sys_ids to delete
 	 * @param continueOnError Whether to continue on individual failures
@@ -271,127 +311,178 @@ export class BatchService {
 	): Promise<BatchOperationResult> {
 		validateWriteAccess(this.instanceManager, instance);
 
+		const resolved = this.instanceManager.resolveInstance(instance);
 		logger.info(`Batch deleting ${sysIds.length} records in ${tableName}`, {
-			instance: instance || 'default',
+			instance: resolved.name,
 			continueOnError,
 			verify,
 		});
 
-		const results: BatchOperationResult['results'] = [];
+		const native = await this.runWaves(
+			sysIds,
+			resolved.name,
+			(sysId, index) => ({
+				id: `d${index}`,
+				method: 'DELETE',
+				url: API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, sysId),
+			}),
+			(sysId, index, response) => BatchService.entryFor(index, response, () => undefined, sysId),
+			continueOnError,
+			instance,
+		);
+
+		if (native) {
+			if (verify) await this.verifyDeletedInBatch(tableName, native, instance);
+			logger.info(
+				`Batch delete completed: ${native.successCount} succeeded, ${native.failureCount} failed`,
+				{ tableName, instance: resolved.name, transport: 'batch-api' },
+			);
+			return native;
+		}
+
+		return this.loopedWaves(
+			sysIds,
+			continueOnError,
+			async (sysId, index) => {
+				await this.tableService.deleteRecord(tableName, sysId, instance);
+				let verified: boolean | undefined;
+				if (verify) {
+					verified = await this.readBackConfirmsDeletion(tableName, sysId, instance);
+				}
+				return { index, success: true, sysId, ...(verify ? { verified } : {}) };
+			},
+			(sysId, index, message) => ({ index, success: false, sysId, error: message }),
+		);
+	}
+
+	/**
+	 * Read back every successfully-deleted record in ONE extra batch request and
+	 * stamp `verified` on each entry.
+	 *
+	 * This is why verification can now default to on for any batch size: the old
+	 * looped path paid one additional round trip per record, which made verifying
+	 * a 50-record delete cost 50 extra requests. Here it costs one.
+	 *
+	 * A record that reads back successfully was NOT deleted — the API returned
+	 * without error but the row survived (a business rule restored it, or the
+	 * delete was silently refused). That flips the entry to a failure, because
+	 * reporting a successful delete for a record still present is the one outcome
+	 * the caller must never be handed.
+	 */
+	private async verifyDeletedInBatch(
+		tableName: string,
+		result: BatchOperationResult,
+		instance?: string,
+	): Promise<void> {
+		const deleted = result.results.filter((r) => r?.success && r.sysId);
+		if (deleted.length === 0) return;
+
+		const client = this.instanceManager.getClient(instance);
+		const requests: BatchSubRequest[] = deleted.map((entry) => ({
+			id: `v${entry.index}`,
+			method: 'GET',
+			url: `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, entry.sysId as string)}?sysparm_fields=sys_id`,
+		}));
+
+		let outcome: Awaited<ReturnType<typeof client.batch>>;
+		try {
+			outcome = await client.batch(requests);
+		} catch (error) {
+			// Verification is an assurance step, not the operation — a failed probe
+			// must not turn completed deletes into reported failures.
+			logger.warn('Batch delete verification could not run', {
+				tableName,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return;
+		}
+
+		for (const entry of deleted) {
+			const response = outcome.responses.get(`v${entry.index}`);
+			// 404 (or any 4xx on the read-back) is the record being gone, as intended.
+			const stillPresent = response !== undefined && response.statusCode < 400;
+			entry.verified = !stillPresent;
+			if (stillPresent) {
+				entry.success = false;
+				entry.error = 'Delete returned success, but the record still exists.';
+				result.successCount--;
+				result.failureCount++;
+			}
+		}
+		result.success = result.failureCount === 0;
+	}
+
+	/**
+	 * Read a record back after deleting it. A 404/"not found" is the confirmation
+	 * that it is gone; anything else means it survived.
+	 */
+	private async readBackConfirmsDeletion(
+		tableName: string,
+		sysId: string,
+		instance?: string,
+	): Promise<boolean> {
+		try {
+			await this.tableService.getRecord(tableName, sysId, ['sys_id'], instance);
+			return false;
+		} catch (error) {
+			const text = String(error).toLowerCase();
+			if (text.includes('404') || text.includes('not found') || text.includes('no record')) {
+				return true;
+			}
+			throw error;
+		}
+	}
+
+	/**
+	 * Fallback transport: the original one-request-per-record loop, run in
+	 * concurrency-bounded waves. Kept for instances without the batch endpoint.
+	 */
+	private async loopedWaves<T>(
+		items: T[],
+		continueOnError: boolean,
+		attempt: (item: T, index: number) => Promise<ResultEntry>,
+		onFailure: (item: T, index: number, message: string) => ResultEntry,
+	): Promise<BatchOperationResult> {
+		const results: ResultEntry[] = [];
 		let successCount = 0;
 		let failureCount = 0;
 		const concurrency = batchConcurrency();
 		const delayMs = batchDelayMs();
 
-		// Process in batches to avoid overwhelming the server
-		for (let i = 0; i < sysIds.length; i += concurrency) {
-			const batch = sysIds.slice(i, i + concurrency);
-			const batchStartIndex = i;
+		for (let i = 0; i < items.length; i += concurrency) {
+			const wave = items.slice(i, i + concurrency);
 
-			logger.debug(`Processing batch ${Math.floor(i / concurrency) + 1}`, {
-				batchSize: batch.length,
-				startIndex: i,
-			});
-
-			// Create promises for all deletes in this batch
-			const batchPromises = batch.map(async (sysId, batchIndex) => {
-				const globalIndex = batchStartIndex + batchIndex;
-
+			const promises = wave.map(async (item, offset) => {
+				const index = i + offset;
 				try {
-					await this.tableService.deleteRecord(tableName, sysId, instance);
-
-					// Same read-after-delete check sn_delete_record does for a single
-					// record: treat a 404/"not found" on the follow-up read as confirmed
-					// deletion, otherwise surface it as a verification failure.
-					let verified: boolean | undefined;
-					if (verify) {
-						try {
-							await this.tableService.getRecord(tableName, sysId, ['sys_id'], instance);
-							verified = false;
-						} catch (verifyError) {
-							const text = String(verifyError).toLowerCase();
-							if (
-								text.includes('404') ||
-								text.includes('not found') ||
-								text.includes('no record')
-							) {
-								verified = true;
-							} else {
-								throw verifyError;
-							}
-						}
-					}
-
-					// Echo only the sys_id, not the full row (see batchCreate).
-					results[globalIndex] = {
-						index: globalIndex,
-						success: true,
-						sysId,
-						...(verify ? { verified } : {}),
-					};
-
+					results[index] = await attempt(item, index);
 					successCount++;
-					return { success: true };
 				} catch (error) {
-					const errorMessage = error instanceof Error ? error.message : String(error);
-
-					results[globalIndex] = {
-						index: globalIndex,
-						success: false,
-						sysId,
-						error: errorMessage,
-					};
-
+					const message = error instanceof Error ? error.message : String(error);
+					results[index] = onFailure(item, index, message);
 					failureCount++;
-
-					logger.warn(`Failed to delete record at index ${globalIndex}`, {
-						error: errorMessage,
-						sysId,
-						tableName,
-					});
-
-					if (!continueOnError) {
-						throw error;
-					}
-
-					return { success: false };
+					logger.warn(`Batch operation failed at index ${index}`, { error: message });
+					if (!continueOnError) throw error;
 				}
 			});
 
-			// Wait for all promises in this batch to complete. See batchCreate: with
-			// continueOnError=false we stop before the next batch (the in-flight batch
-			// can't be recalled), bounding the blast radius.
-			await Promise.allSettled(batchPromises);
+			// The records in THIS wave were already dispatched concurrently and can't
+			// be recalled; with continueOnError=false we stop *before scheduling the
+			// next wave*, bounding the blast radius to the in-flight wave.
+			await Promise.allSettled(promises);
 
-			if (!continueOnError && failureCount > 0) {
-				logger.warn(`Batch delete stopping after failure (continueOnError=false)`, {
-					processed: i + batch.length,
-					total: sysIds.length,
-				});
-				break;
-			}
+			if (!continueOnError && failureCount > 0) break;
 
-			// Small delay between batches to avoid rate limiting
-			if (delayMs > 0 && i + concurrency < sysIds.length) {
+			if (delayMs > 0 && i + concurrency < items.length) {
 				await this.sleep(delayMs);
 			}
 		}
 
-		logger.info(`Batch delete completed: ${successCount} succeeded, ${failureCount} failed`, {
-			tableName,
-			instance: instance || 'default',
-		});
-
-		return {
-			success: failureCount === 0,
-			successCount,
-			failureCount,
-			results,
-		};
+		return { success: failureCount === 0, successCount, failureCount, results };
 	}
 
 	/**
-	 * Sleep utility for delays between batches
+	 * Sleep utility for delays between waves
 	 */
 	private sleep(ms: number): Promise<void> {
 		return new Promise((resolve) => setTimeout(resolve, ms));

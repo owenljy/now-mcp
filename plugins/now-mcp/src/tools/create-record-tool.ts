@@ -11,12 +11,14 @@ import { failureHints, renderHints } from '../utils/failure-enrichment.js';
 import { preflightFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
 import { toolResult } from '../utils/tool-response.js';
+import { checkWriteRouting } from '../utils/write-routing.js';
 
 export const CREATE_RECORD_TOOL = {
 	name: 'sn_create_record',
 	title: 'Create record',
 	description: `What: Insert a new record into a ServiceNow table.
 When to use: To create data records (incident, sys_user, etc.). Do NOT use it to author app metadata (business rules, ACLs, UI policies) — that belongs in the Fluent SDK.
+When NOT to use: cmdb_ci* — a direct insert bypasses the Identification and Reconciliation Engine and creates duplicate CIs; use /api/now/identifyreconcile. sc_request / sc_req_item / sc_task — a direct insert produces a request no workflow ever picks up; use the Service Catalog order API. Both are blocked here with the correct call named in the error.
 Preconditions: Write-enabled instance (readOnly: false); field names valid for the table (validated automatically).
 Produces: sys_id plus the fields you set (not the whole freshly-created row).`,
 	inputSchema: CreateRecordSchema,
@@ -34,6 +36,21 @@ export function createCreateRecordTool(tableService: TableService, schemaService
 				logger.info(`Creating record in ${validated.tableName}`, {
 					fields: Object.keys(validated.fields),
 				});
+
+				// Pre-flight: some tables are the OUTPUT of a platform engine, and a
+				// direct insert produces a broken row that ServiceNow still answers 201 to.
+				const routingError = await checkWriteRouting(
+					validated.tableName,
+					validated.acknowledgeRoutingRisk,
+					schemaService,
+					validated.instance,
+				);
+				if (routingError) {
+					return {
+						content: [{ type: 'text' as const, text: routingError }],
+						isError: true as const,
+					};
+				}
 
 				// Pre-flight: catch typo'd field names that the Table API would silently drop.
 				const message = await preflightFieldValidation(

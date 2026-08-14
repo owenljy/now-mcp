@@ -10,12 +10,14 @@ import { toolError } from '../utils/error-handler.js';
 import { collectFieldNames, preflightFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
 import { toolResult } from '../utils/tool-response.js';
+import { checkWriteRouting } from '../utils/write-routing.js';
 
 export const BATCH_CREATE_TOOL = {
 	name: 'sn_batch_create',
 	title: 'Batch create records',
-	description: `What: Create many records in one table via looped Table API calls (25 concurrent, rate-limited) — not a single bulk request and NOT transactional.
+	description: `What: Create many records in one table via the Table Batch API — one request per wave of 25, NOT transactional.
 When to use: To insert several records at once. For a single record use sn_create_record.
+When NOT to use: cmdb_ci* (bypasses the Identification and Reconciliation Engine → duplicate CIs) and sc_request / sc_req_item / sc_task (bypasses the catalog workflow). Both are blocked with the correct API named in the error.
 Preconditions: Write-enabled instance (readOnly: false); valid field names (validated automatically). Default max 50 records per call (configurable via SERVICENOW_MAX_BATCH_SIZE).
 Produces: Per-record success/failure with sys_ids, plus success/failure counts. Not atomic: on failure, already-created rows are NOT rolled back — inspect results[] to see what landed.`,
 	inputSchema: BatchCreateSchema,
@@ -39,6 +41,21 @@ export function createBatchCreateTool(batchService: BatchService, schemaService?
 						continueOnError: validated.continueOnError,
 					},
 				);
+
+				// Pre-flight: a routed table would take 50 broken inserts just as happily
+				// as one, so this check matters more here than on the single-record path.
+				const routingError = await checkWriteRouting(
+					validated.tableName,
+					validated.acknowledgeRoutingRisk,
+					schemaService,
+					validated.instance,
+				);
+				if (routingError) {
+					return {
+						content: [{ type: 'text' as const, text: routingError }],
+						isError: true as const,
+					};
+				}
 
 				// Pre-flight: validate the union of field names across the whole batch.
 				// A typo'd field would otherwise be silently dropped on up to 50 records.

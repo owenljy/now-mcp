@@ -117,8 +117,10 @@ test('query_records summary is thin and rows stay in structuredContent', async (
 	assert.deepEqual(res.structuredContent.records, rows, 'rows live in structuredContent');
 	assert.match(res.content[0].text, /1 row\(s\)/);
 	assert.ok(!res.content[0].text.includes('INC1'), 'row data not duplicated into the summary text');
-	// counts/truncation stay in the body; _meta is only instance/duration
-	assert.deepEqual(Object.keys(res._meta).sort(), ['durationMs', 'instance']);
+	// counts/truncation stay in the body; _meta is instance/duration plus which
+	// transport served the read (table-api vs graphql, when expand is used).
+	assert.deepEqual(Object.keys(res._meta).sort(), ['durationMs', 'instance', 'transport']);
+	assert.equal(res._meta.transport, 'table-api');
 });
 
 test('batch_create response drops successRate and prose message', async () => {

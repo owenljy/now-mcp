@@ -4,11 +4,14 @@
 
 import { QueryRecordsOutputSchema } from '../schemas/output-schemas.js';
 import { QueryRecordsSchema } from '../schemas/table-schemas.js';
+import { type GraphqlService, GraphqlUnavailableError } from '../services/graphql-service.js';
 import type { SchemaService } from '../services/schema-service.js';
 import type { TableService } from '../services/table-service.js';
 import { ServiceNowError } from '../types/errors.js';
+import { extractQueryFields } from '../utils/encoded-query.js';
 import { toolError } from '../utils/error-handler.js';
 import { zeroResultHints } from '../utils/failure-enrichment.js';
+import { preflightReadFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
 import { assessQueryRisk } from '../utils/query-risk.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
@@ -77,6 +80,12 @@ Produces: An array of the matching records (plus pagination metadata, and recove
 
 Encoded query goes in the query param (operators: = != ^ ^OR > < >= <= LIKE STARTSWITH ENDSWITH IN ISEMPTY ISNOTEMPTY; dot-walk reference fields, e.g. caller_id.department.name=Network).
 
+Field names in query/fields are checked against the table schema first, because ServiceNow SILENTLY IGNORES an unknown field in an encoded query — priorityy=1 returns the whole table with HTTP 200 and no error. A typo is reported here instead of quietly widening the result; skipFieldValidation:true runs the query as written.
+
+Journal fields (comments, work_notes) read back EMPTY unless displayValue is set — the entry stream with timestamps and authors only exists in the display value. Use displayValue:"all" to get them.
+
+expand pulls fields from referenced records in one request, e.g. expand={"caller_id":["name","email"]} — one level deep, and requires fields to be listed.
+
 A 403 is auto-diagnosed against the table's web-service access flag, so the returned hint distinguishes "this table blocks all REST access regardless of role" from "your account lacks the required role/ACL" — trust that hint over re-investigating roles manually.
 
 Examples:
@@ -86,7 +95,11 @@ Examples:
 	outputSchema: QueryRecordsOutputSchema,
 };
 
-export function createQueryRecordsTool(tableService: TableService, schemaService: SchemaService) {
+export function createQueryRecordsTool(
+	tableService: TableService,
+	schemaService: SchemaService,
+	graphqlService?: GraphqlService,
+) {
 	return {
 		...QUERY_RECORDS_TOOL,
 		handler: async (params: unknown) => {
@@ -113,36 +126,152 @@ export function createQueryRecordsTool(tableService: TableService, schemaService
 					};
 				}
 
+				const expand = validated.expand;
+
+				// Pre-flight the field names. This is the read-path counterpart to the
+				// write tools' check, and it matters more here: an unknown field in a
+				// WRITE payload is dropped from that payload, but an unknown field in an
+				// encoded query drops the whole CONDITION — the read silently widens to
+				// the entire table and still reports success.
+				const referencedFields = [
+					...extractQueryFields(validated.query),
+					...(validated.fields ?? []),
+					...Object.keys(expand ?? {}),
+				];
+				const fieldError = await preflightReadFieldValidation(
+					schemaService,
+					validated.tableName,
+					referencedFields,
+					{ skip: validated.skipFieldValidation, instance: validated.instance },
+				);
+				if (fieldError) {
+					return {
+						content: [{ type: 'text' as const, text: fieldError }],
+						isError: true as const,
+					};
+				}
+
+				const warnings: string[] = [];
+
+				// Journal columns return "" in `value` and put the whole entry stream in
+				// `display_value`, so the default displayValue:false turns "read the work
+				// notes" into "there are no work notes". Warn rather than silently
+				// overriding the caller's argument.
+				if (validated.displayValue === false && validated.fields?.length) {
+					const journalFields = await schemaService.journalFieldsAmong(
+						validated.tableName,
+						validated.fields,
+						validated.instance,
+					);
+					if (journalFields.length > 0) {
+						warnings.push(
+							`${journalFields.join(', ')} ${journalFields.length === 1 ? 'is a journal field' : 'are journal fields'} — ` +
+								`the value read back is EMPTY even when entries exist. An empty result here does NOT mean ` +
+								`there are no comments/work notes. Re-run with displayValue:"all" to get the entry stream ` +
+								`(timestamps, authors, text).`,
+						);
+					}
+				}
+
 				logger.info(`Querying ${validated.tableName}`, {
 					query: validated.query,
 					limit: validated.limit,
 					offset: validated.offset,
+					expand: expand ? Object.keys(expand) : undefined,
 				});
 
 				// Query records
 				const startedAt = Date.now();
-				const {
-					records,
-					totalCount,
-					hasMore: fallbackHasMore,
-					source,
-					fallbackProfile,
-				} = await tableService.queryRecordsWithMeta(
-					validated.tableName,
-					{
-						query: validated.query,
-						limit: validated.limit,
-						offset: validated.offset,
-						fields: validated.fields,
-						displayValue: validated.displayValue,
-						excludeReferenceLink: validated.excludeReferenceLink,
-					},
-					validated.instance,
-				);
+				// Initialized empty so the compiler can see them as assigned; one of the
+				// two branches below always overwrites both.
+				let records: Record<string, unknown>[] = [];
+				let totalCount: number | null = null;
+				let fallbackHasMore: boolean | undefined;
+				let source: string | undefined;
+				let fallbackProfile: string | undefined;
+				let transport = 'table-api';
+
+				const graphqlPlan = expand && graphqlService ? expand : undefined;
+				let usedGraphql = false;
+
+				if (graphqlPlan) {
+					if (!validated.fields || validated.fields.length === 0) {
+						return {
+							content: [
+								{
+									type: 'text' as const,
+									text:
+										'expand requires fields to be listed: GraphQL has no "select every column", ' +
+										'so name the base fields you want alongside the expanded reference(s).',
+								},
+							],
+							isError: true as const,
+						};
+					}
+					try {
+						const gql = await (graphqlService as GraphqlService).queryRecords(
+							validated.tableName,
+							{
+								query: validated.query,
+								limit: validated.limit,
+								offset: validated.offset,
+								fields: validated.fields,
+								displayValue: validated.displayValue,
+								expand: graphqlPlan,
+							},
+							validated.instance,
+						);
+						records = gql.records as Record<string, unknown>[];
+						totalCount = gql.totalCount;
+						transport = 'graphql';
+						usedGraphql = true;
+					} catch (error) {
+						if (!(error instanceof GraphqlUnavailableError)) throw error;
+						logger.warn('GraphQL expand unavailable — falling back to dot-walked fields', {
+							table: validated.tableName,
+							error: error.message,
+						});
+						warnings.push(
+							`expand fell back to the Table API (${error.message}) — the referenced fields are ` +
+								`returned FLAT as dot-walked columns (e.g. "caller_id.name"), not nested under the ` +
+								`reference field.`,
+						);
+					}
+				}
+
+				if (!usedGraphql) {
+					// Dot-walked equivalents of `expand`, for the Table API path.
+					const dotWalked = expand
+						? Object.entries(expand).flatMap(([ref, subs]) => subs.map((sub) => `${ref}.${sub}`))
+						: [];
+					const requestFields =
+						validated.fields && dotWalked.length > 0
+							? [...validated.fields, ...dotWalked]
+							: validated.fields;
+
+					const result = await tableService.queryRecordsWithMeta(
+						validated.tableName,
+						{
+							query: validated.query,
+							limit: validated.limit,
+							offset: validated.offset,
+							fields: requestFields,
+							displayValue: validated.displayValue,
+							excludeReferenceLink: validated.excludeReferenceLink,
+						},
+						validated.instance,
+					);
+					records = result.records as Record<string, unknown>[];
+					totalCount = result.totalCount;
+					fallbackHasMore = result.hasMore;
+					source = result.source;
+					fallbackProfile = result.fallbackProfile;
+				}
 				const durationMs = Date.now() - startedAt;
 
 				// fetchedCount = rows in this page; totalMatching = rows matching the
-				// query across all pages (from X-Total-Count, null if not reported).
+				// query across all pages (from X-Total-Count or GraphQL _rowCount, null
+				// if not reported).
 				const fetchedCount = records.length;
 				const totalMatching = totalCount;
 
@@ -181,6 +310,7 @@ export function createQueryRecordsTool(tableService: TableService, schemaService
 						hasMore,
 						...(totalMatching !== null ? { totalMatching } : {}),
 					},
+					transport,
 				};
 
 				// Signal truncation explicitly so the caller can narrow the query
@@ -200,6 +330,10 @@ export function createQueryRecordsTool(tableService: TableService, schemaService
 						table: validated.tableName,
 						query: validated.query,
 					});
+				}
+
+				if (warnings.length > 0) {
+					response.warnings = warnings;
 				}
 
 				// Thin text summary; the rows live in structuredContent (which the caller
@@ -227,6 +361,10 @@ export function createQueryRecordsTool(tableService: TableService, schemaService
 							`specific record another way (e.g. a targeted background script) if you need it in full.`,
 					);
 				}
+				// Journal/expand warnings are surfaced as their own text block too: a
+				// caller that reads only the summary would otherwise act on an empty
+				// journal value as if it meant "no comments".
+				extraTextParts.push(...warnings);
 				const extraText = extraTextParts.length > 0 ? extraTextParts : undefined;
 
 				// _meta carries only genuinely result-level fields (WS-B §4.2); counts and
@@ -235,6 +373,7 @@ export function createQueryRecordsTool(tableService: TableService, schemaService
 					meta: {
 						instance: validated.instance || 'default',
 						durationMs,
+						transport,
 						...(source ? { source } : {}),
 						...(fallbackProfile ? { fallbackProfile } : {}),
 					},

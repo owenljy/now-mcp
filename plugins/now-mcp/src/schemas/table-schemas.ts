@@ -3,7 +3,10 @@
  */
 
 import { z } from 'zod';
+import { enforceBatchSize } from './batch-schemas.js';
 import {
+	acknowledgeRoutingRiskField,
+	continueOnErrorField,
 	instanceField,
 	skipFieldValidationField,
 	sysIdField,
@@ -59,6 +62,13 @@ export const QueryRecordsSchema = z.object({
 		.describe(
 			'Strip the API URL metadata from reference fields (default true). Keep true unless you specifically need the raw reference links — it removes noise and shrinks the result.',
 		),
+	expand: z
+		.record(z.array(z.string()).min(1))
+		.optional()
+		.describe(
+			'Fetch fields from referenced records in the SAME request, e.g. {"caller_id":["name","email"]}. One level deep. Routed via GraphQL; falls back to dot-walked fields if unavailable.',
+		),
+	skipFieldValidation: skipFieldValidationField.default(false),
 });
 
 export type QueryRecordsInput = z.infer<typeof QueryRecordsSchema>;
@@ -96,6 +106,7 @@ export const AggregateRecordsSchema = z.object({
 		.describe(
 			'Return display values (names) for group-by reference fields — set true when grouping by a reference field to avoid a second sys_id→name lookup.',
 		),
+	skipFieldValidation: skipFieldValidationField.default(false),
 });
 
 export type AggregateRecordsInput = z.infer<typeof AggregateRecordsSchema>;
@@ -128,6 +139,7 @@ export const CreateRecordSchema = z.object({
 		})
 		.describe('Field-value pairs for the new record'),
 	skipFieldValidation: skipFieldValidationField.default(false),
+	acknowledgeRoutingRisk: acknowledgeRoutingRiskField,
 });
 
 export type CreateRecordInput = z.infer<typeof CreateRecordSchema>;
@@ -157,17 +169,29 @@ export const UpdateRecordSchema = z.object({
 export type UpdateRecordInput = z.infer<typeof UpdateRecordSchema>;
 
 /**
- * Schema for deleting a record
+ * Schema for deleting one or many records.
+ *
+ * One schema (and one tool) covers both: the single-record case is just an
+ * array of length 1. Splitting them forced the caller to pick a tool based on
+ * cardinality — a decision that carries no meaning, since the underlying Table
+ * API call is identical either way.
  */
-export const DeleteRecordSchema = z.object({
+export const DeleteRecordsSchema = z.object({
 	instance: instanceField,
 	tableName: tableNameField(),
-	sysId: sysIdField(),
+	sysIds: z
+		.array(sysIdField())
+		.min(1, 'At least one sys_id is required')
+		.superRefine(enforceBatchSize)
+		.describe('sys_id(s) to delete — one or many.'),
 	verify: z
 		.boolean()
 		.optional()
 		.default(true)
-		.describe('Verify the record no longer exists after deletion (default true).'),
+		.describe(
+			'Read each record back after deleting to confirm it is gone (default true). Batched into one extra request, so the cost does not scale with the number of records.',
+		),
+	continueOnError: continueOnErrorField,
 });
 
-export type DeleteRecordInput = z.infer<typeof DeleteRecordSchema>;
+export type DeleteRecordsInput = z.infer<typeof DeleteRecordsSchema>;

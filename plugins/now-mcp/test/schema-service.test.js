@@ -255,3 +255,103 @@ test('checkWebServiceAccess serves the second call from cache (client hit once)'
   await svc.checkWebServiceAccess('sn_grc_indicator', 'wscache');
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
 });
+
+/**
+ * Stub returning dictionary rows in the OBJECT form: internal_type and reference
+ * are reference columns on sys_dictionary, so without
+ * sysparm_exclude_reference_link ServiceNow answers with {value, link}. Verified
+ * on a live instance — task.comments came back as
+ * {"link":".../sys_glide_object?name=journal_input","value":"journal_input"},
+ * which made every field's advertised `type` an object carrying an API URL and
+ * silently broke type comparisons.
+ */
+function makeObjectFormClient() {
+  const link = (name) => ({
+    value: name,
+    link: `https://dev.service-now.com/api/now/table/sys_glide_object?name=${name}`,
+  });
+  return {
+    async get(endpoint) {
+      if (endpoint === '/api/now/table/sys_dictionary') {
+        return {
+          result: [
+            {
+              element: 'comments',
+              column_label: 'Additional comments',
+              internal_type: link('journal_input'),
+              mandatory: 'false',
+              read_only: 'false',
+              max_length: '4000',
+              reference: '',
+            },
+            {
+              element: 'caller_id',
+              column_label: 'Caller',
+              internal_type: link('reference'),
+              mandatory: 'false',
+              read_only: 'false',
+              max_length: '32',
+              reference: link('sys_user'),
+            },
+          ],
+        };
+      }
+      if (endpoint === '/api/now/table/sys_db_object') {
+        return { result: [{ name: 'incident', label: 'Incident', 'super_class.name': '' }] };
+      }
+      return { result: [] };
+    },
+  };
+}
+
+test('the dictionary query excludes reference links so field types are plain names', async () => {
+  const client = makeStubClient();
+  const svc = new SchemaService(makeManager(client, { name: 'reflink1' }));
+  await svc.getTableSchema('incident');
+
+  const dictCall = client.state.calls.find((c) => c.endpoint === '/api/now/table/sys_dictionary');
+  assert.equal(dictCall.params.sysparm_exclude_reference_link, true);
+});
+
+test('a field type arriving as a {value, link} object is normalized to its name', async () => {
+  const svc = new SchemaService(makeManager(makeObjectFormClient(), { name: 'reflink2' }));
+  const schema = await svc.getTableSchema('incident');
+
+  const comments = schema.fields.find((f) => f.name === 'comments');
+  assert.equal(comments.type, 'journal_input', 'type must be a plain string, not an object');
+  const caller = schema.fields.find((f) => f.name === 'caller_id');
+  assert.equal(caller.type, 'reference');
+  assert.equal(caller.reference, 'sys_user');
+});
+
+test('journal columns are detected through the inheritance chain', async () => {
+  const svc = new SchemaService(makeManager(makeObjectFormClient(), { name: 'reflink3' }));
+
+  // The object form must not defeat detection — this is what made the live
+  // journal warning silently never fire.
+  assert.deepEqual(
+    await svc.journalFieldsAmong('incident', ['caller_id', 'comments']),
+    ['comments'],
+  );
+});
+
+test('extendsFrom walks the parent chain and reports a non-descendant as false', async () => {
+  const chain = { incident: 'task', task: '', cmdb_ci_server: 'cmdb_ci', cmdb_ci: '', cmdb_ci_outage: 'task' };
+  const client = {
+    async get(endpoint, params) {
+      if (endpoint === '/api/now/table/sys_dictionary') return { result: [] };
+      const name = String(params.sysparm_query).replace('name=', '');
+      if (!(name in chain)) return { result: [] };
+      return { result: [{ name, label: name, 'super_class.name': chain[name] }] };
+    },
+  };
+  const svc = new SchemaService(makeManager(client, { name: 'ancestry' }));
+
+  assert.equal(await svc.extendsFrom('cmdb_ci_server', 'cmdb_ci'), true);
+  assert.equal(await svc.extendsFrom('cmdb_ci', 'cmdb_ci'), true);
+  // Carries the cmdb_ci_ prefix but extends task — must not be treated as a CI.
+  assert.equal(await svc.extendsFrom('cmdb_ci_outage', 'cmdb_ci'), false);
+  assert.equal(await svc.extendsFrom('incident', 'cmdb_ci'), false);
+  // Unknown table => unresolvable, so callers can fail open.
+  assert.equal(await svc.extendsFrom('no_such_table', 'cmdb_ci'), null);
+});

@@ -9,7 +9,8 @@ import {
   DEFAULT_BATCH_DELAY_MS,
   MAX_BATCH_SIZE_CEILING,
 } from '../build/config/batch-config.js';
-import { BatchCreateSchema, BatchUpdateSchema, BatchDeleteSchema } from '../build/schemas/batch-schemas.js';
+import { BatchCreateSchema, BatchUpdateSchema } from '../build/schemas/batch-schemas.js';
+import { DeleteRecordsSchema } from '../build/schemas/table-schemas.js';
 
 const SYS_ID = 'a'.repeat(32);
 
@@ -114,18 +115,21 @@ test('BatchUpdateSchema enforces the configured cap at parse time', () => {
   });
 });
 
-test('BatchDeleteSchema enforces the configured cap at parse time', () => {
+test('DeleteRecordsSchema enforces the configured cap at parse time', () => {
   withEnv('SERVICENOW_MAX_BATCH_SIZE', undefined, () => {
-    assert.doesNotThrow(() => BatchDeleteSchema.parse({ tableName: 'incident', sysIds: makeSysIds(50) }));
+    assert.doesNotThrow(() => DeleteRecordsSchema.parse({ tableName: 'incident', sysIds: makeSysIds(50) }));
     assert.throws(
-      () => BatchDeleteSchema.parse({ tableName: 'incident', sysIds: makeSysIds(51) }),
+      () => DeleteRecordsSchema.parse({ tableName: 'incident', sysIds: makeSysIds(51) }),
       /more than 50 records/,
     );
   });
 });
 
-test('BatchDeleteSchema defaults verify to false and continueOnError to true', () => {
-  const parsed = BatchDeleteSchema.parse({ tableName: 'incident', sysIds: makeSysIds(1) });
-  assert.equal(parsed.verify, false);
+// verify defaults to TRUE at any size now: the read-back is one extra batched
+// request rather than one per record, so it no longer costs 50 round trips to
+// verify a 50-record delete.
+test('DeleteRecordsSchema defaults verify and continueOnError to true', () => {
+  const parsed = DeleteRecordsSchema.parse({ tableName: 'incident', sysIds: makeSysIds(1) });
+  assert.equal(parsed.verify, true);
   assert.equal(parsed.continueOnError, true);
 });

@@ -26,6 +26,13 @@ function normalizeSNRef(val: unknown): string | undefined {
 }
 
 /**
+ * sys_dictionary internal_type values for journal columns. These read back with
+ * an empty `value` and the whole entry stream in `display_value` only — see
+ * journalFieldsAmong below.
+ */
+const JOURNAL_TYPES = new Set(['journal', 'journal_input', 'journal_list']);
+
+/**
  * Cache configuration for schema data
  */
 const CACHE_TTL = 15 * 60 * 1000; // in-memory (L1) TTL: 15 minutes
@@ -65,6 +72,32 @@ export class SchemaService {
 	}
 
 	/**
+	 * Collect every field a table exposes, keyed by name, by walking the
+	 * inheritance chain so fields defined on parent tables (e.g. `number` on
+	 * `task`, inherited by `incident`) are included. Each table schema is cached,
+	 * so the walk costs at most one API call per table in the chain.
+	 */
+	private async collectFields(
+		tableName: string,
+		instance?: string,
+	): Promise<Map<string, FieldMetadata>> {
+		const known = new Map<string, FieldMetadata>();
+		let current: string | undefined = tableName;
+		const visited = new Set<string>();
+		while (current && !visited.has(current)) {
+			visited.add(current);
+			const schema = await this.getTableSchema(current, false, instance);
+			for (const f of schema.fields) {
+				// First definition wins: a child table's override of an inherited
+				// field is the one that applies.
+				if (f.name && !known.has(f.name)) known.set(f.name, f);
+			}
+			current = schema.extends;
+		}
+		return known;
+	}
+
+	/**
 	 * Validate a set of field names against a table's schema, returning unknown
 	 * fields with typo suggestions. Returns null if the schema can't be loaded
 	 * (e.g. no read access to sys_dictionary) so callers can skip gracefully.
@@ -75,27 +108,91 @@ export class SchemaService {
 		instance?: string,
 	): Promise<FieldValidationResult | null> {
 		try {
-			// Walk the inheritance chain so fields defined on parent tables (e.g.
-			// `number` on `task`, inherited by `incident`) are included. Each table
-			// schema is cached, so the walk only costs one API call per table.
-			const known = new Set<string>();
-			let current: string | undefined = tableName;
-			const visited = new Set<string>();
-			while (current && !visited.has(current)) {
-				visited.add(current);
-				const schema = await this.getTableSchema(current, false, instance);
-				for (const f of schema.fields) {
-					if (f.name) known.add(f.name);
-				}
-				current = schema.extends;
-			}
+			const known = await this.collectFields(tableName, instance);
 			if (known.size === 0) return null;
-			return validateFieldNames(fieldNames, [...known]);
+			return validateFieldNames(fieldNames, [...known.keys()]);
 		} catch (error) {
 			logger.debug(`Field validation skipped for ${tableName}`, {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			return null;
+		}
+	}
+
+	/**
+	 * Does `tableName` descend from `ancestor` (or is it that table)?
+	 *
+	 * Needed because a name prefix is not a reliable proxy for the CI hierarchy:
+	 * on a stock instance `cmdb_ci_outage`, `cmdb_ci_model_entry` and several
+	 * `cmdb_ci_m2m_*` tables all start with `cmdb_ci_` without extending
+	 * `cmdb_ci`. Routing outage inserts to the identification engine on the
+	 * strength of their name would block ordinary, correct writes.
+	 *
+	 * Returns null when the chain can't be resolved (no dictionary access), so
+	 * callers can fail open rather than block on an unrelated failure. Each step
+	 * is cached, so a repeated check costs nothing.
+	 */
+	async extendsFrom(
+		tableName: string,
+		ancestor: string,
+		instance?: string,
+	): Promise<boolean | null> {
+		if (tableName === ancestor) return true;
+		try {
+			let current: string | undefined = tableName;
+			const visited = new Set<string>();
+			while (current && !visited.has(current)) {
+				visited.add(current);
+				const schema = await this.getTableSchema(current, false, instance);
+				if (!schema.exists) return null;
+				if (schema.extends === ancestor) return true;
+				current = schema.extends;
+			}
+			return false;
+		} catch (error) {
+			logger.debug(`Inheritance check skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+	}
+
+	/**
+	 * Of the given field names, which are journal fields (comments, work_notes,
+	 * and any custom journal column)?
+	 *
+	 * Journal columns do not behave like other columns on a read: the stored
+	 * `value` comes back as an EMPTY STRING and the entry stream (timestamps,
+	 * authors, text) is only rendered into `display_value`. Verified on a live
+	 * instance — INC0000060 returns nine comment entries in `display_value` and
+	 * `"value": ""`.
+	 *
+	 * That makes the default `displayValue: false` actively misleading rather
+	 * than merely incomplete: the caller asks for `comments`, receives `""`, and
+	 * concludes the record has none. Callers use this to warn instead.
+	 *
+	 * Best-effort: returns an empty array when the schema can't be loaded, so it
+	 * can never break a read.
+	 */
+	async journalFieldsAmong(
+		tableName: string,
+		fieldNames: string[],
+		instance?: string,
+	): Promise<string[]> {
+		if (fieldNames.length === 0) return [];
+		try {
+			const known = await this.collectFields(tableName, instance);
+			return fieldNames.filter((name) => {
+				// Dot-walked names resolve on another table; only the local column's
+				// type is knowable here.
+				const meta = known.get(name);
+				return meta ? JOURNAL_TYPES.has(meta.type) : false;
+			});
+		} catch (error) {
+			logger.debug(`Journal-field detection skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return [];
 		}
 	}
 
@@ -192,8 +289,15 @@ export class SchemaService {
 		const cached = this.getFromCache<TableMetadata>(cacheKey);
 		if (cached) {
 			logger.debug(`Cache hit for table schema: ${tableName}`);
-			// Disk cache may predate the normalization fix — re-normalize on the way out.
+			// Disk cache may predate the normalization fixes — re-normalize on the way
+			// out, for the parent-table pointer and for each field's type/reference
+			// (which were stored as {value, link} objects before exclude_reference_link
+			// was set on the dictionary query).
 			cached.extends = normalizeSNRef(cached.extends);
+			for (const field of cached.fields) {
+				field.type = normalizeSNRef(field.type) ?? '';
+				field.reference = normalizeSNRef(field.reference);
+			}
 			return cached;
 		}
 
@@ -218,17 +322,25 @@ export class SchemaService {
 				result: Array<{
 					element: string;
 					column_label: string;
-					internal_type: string;
+					// Reference columns: a plain name with exclude_reference_link, a
+					// {value, link} object without it. normalizeSNRef handles both.
+					internal_type: unknown;
 					mandatory: string;
 					read_only: string;
 					max_length: string;
-					reference: string;
+					reference: unknown;
 				}>;
 			}>('/api/now/table/sys_dictionary', {
 				sysparm_query: query,
 				sysparm_fields:
 					'element,column_label,internal_type,mandatory,read_only,max_length,reference',
 				sysparm_limit: 1000,
+				// internal_type and reference are REFERENCE columns on sys_dictionary, so
+				// without this they come back as {value, link} objects rather than plain
+				// names. That made every field's advertised `type` an object carrying a
+				// full API URL — noise in sn_get_table_schema's output, and it silently
+				// broke any type comparison (e.g. spotting journal columns).
+				sysparm_exclude_reference_link: true,
 			}),
 			client.get<{
 				result: Array<{
@@ -246,11 +358,14 @@ export class SchemaService {
 		const fields: FieldMetadata[] = response.result.map((field) => ({
 			name: field.element,
 			label: field.column_label,
-			type: field.internal_type,
+			// normalizeSNRef as well as the exclude_reference_link above: the disk cache
+			// has a 24h TTL, so entries written before that fix still hold the object
+			// form and would otherwise keep breaking type checks for a day.
+			type: normalizeSNRef(field.internal_type) ?? '',
 			mandatory: field.mandatory === 'true',
 			readOnly: field.read_only === 'true',
 			maxLength: field.max_length ? parseInt(field.max_length, 10) : undefined,
-			reference: field.reference || undefined,
+			reference: normalizeSNRef(field.reference),
 		}));
 
 		const tableInfo = tableResponse.result[0];

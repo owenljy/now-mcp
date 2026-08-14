@@ -22,7 +22,7 @@ const EXPECTED_CORE_TOOLS = [
   'sn_aggregate_records',
   'sn_create_record',
   'sn_update_record',
-  'sn_delete_record',
+  'sn_delete_records',
   'sn_get_table_schema',
   'sn_list_tables',
   'sn_connection_status',
@@ -86,12 +86,12 @@ test('server advertises a spec-compliant tool list over MCP stdio', { timeout: 3
       );
     }
 
-    const deleteTool = byName.get('sn_delete_record');
+    const deleteTool = byName.get('sn_delete_records');
     if (deleteTool && deleteTool.annotations) {
       assert.equal(
         deleteTool.annotations.destructiveHint,
         true,
-        'sn_delete_record should be annotated destructiveHint=true'
+        'sn_delete_records should be annotated destructiveHint=true'
       );
     }
   } finally {
@@ -173,12 +173,12 @@ test('every advertised tool carries an openWorldHint annotation', { timeout: 300
       'sn_query_records should be annotated readOnlyHint=true'
     );
 
-    const deleteTool = byName.get('sn_delete_record');
-    assert.ok(deleteTool && deleteTool.annotations, 'sn_delete_record must carry annotations');
+    const deleteTool = byName.get('sn_delete_records');
+    assert.ok(deleteTool && deleteTool.annotations, 'sn_delete_records must carry annotations');
     assert.equal(
       deleteTool.annotations.destructiveHint,
       true,
-      'sn_delete_record should be annotated destructiveHint=true'
+      'sn_delete_records should be annotated destructiveHint=true'
     );
 
     // A live-instance tool reaches an external ServiceNow instance → openWorld.
