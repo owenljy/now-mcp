@@ -8,6 +8,7 @@ import {
 	acknowledgeRoutingRiskField,
 	continueOnErrorField,
 	instanceField,
+	preflightAccessField,
 	skipFieldValidationField,
 	sysIdField,
 	tableNameField,
@@ -140,6 +141,7 @@ export const CreateRecordSchema = z.object({
 		.describe('Field-value pairs for the new record'),
 	skipFieldValidation: skipFieldValidationField.default(false),
 	acknowledgeRoutingRisk: acknowledgeRoutingRiskField,
+	preflightAccess: preflightAccessField,
 });
 
 export type CreateRecordInput = z.infer<typeof CreateRecordSchema>;
@@ -159,6 +161,7 @@ export const UpdateRecordSchema = z.object({
 		.describe('Field-value pairs to update'),
 	updateType: updateTypeField,
 	skipFieldValidation: skipFieldValidationField.default(false),
+	preflightAccess: preflightAccessField,
 	verify: z
 		.boolean()
 		.optional()

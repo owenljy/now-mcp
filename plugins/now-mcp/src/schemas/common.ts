@@ -43,6 +43,18 @@ export const skipFieldValidationField = z
 	.optional()
 	.describe('Skip pre-flight field-name validation against the table schema.');
 
+/**
+ * Ask ServiceNow whether this write is permitted BEFORE sending it, using the
+ * platform's own effective-ACL verdict for the API user (see
+ * utils/access-preflight.ts). Off by default: it costs one extra round trip, and
+ * the platform's response to the write itself remains the authority.
+ */
+export const preflightAccessField = z
+	.boolean()
+	.optional()
+	.default(false)
+	.describe("Check the API user's effective ACL verdict before writing (one extra request).");
+
 /** partial = PATCH (only provided fields); full = PUT (replace whole record). */
 export const updateTypeField = z
 	.enum(['partial', 'full'])

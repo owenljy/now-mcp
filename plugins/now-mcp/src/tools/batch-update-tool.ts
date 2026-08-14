@@ -7,6 +7,7 @@ import { BatchUpdateSchema } from '../schemas/batch-schemas.js';
 import { BatchOutputSchema } from '../schemas/output-schemas.js';
 import type { BatchService } from '../services/batch-service.js';
 import type { SchemaService } from '../services/schema-service.js';
+import { type EffectiveAccessReader, preflightEffectiveAccess } from '../utils/access-preflight.js';
 import { elicitConfirmation, toolAborted } from '../utils/elicitation.js';
 import { toolError } from '../utils/error-handler.js';
 import { collectFieldNames, preflightFieldValidation } from '../utils/field-validation.js';
@@ -19,12 +20,17 @@ export const BATCH_UPDATE_TOOL = {
 	description: `What: Update many records in one table via the Table Batch API — one request per wave of 25, NOT transactional.
 When to use: To change several records at once. For a single record use sn_update_record.
 Preconditions: Write-enabled instance (readOnly: false); valid sys_ids and field names. Default max 50 updates per call (configurable via SERVICENOW_MAX_BATCH_SIZE).
-Produces: Per-record success/failure with sys_ids, plus counts. Not atomic: on failure, already-applied updates are NOT rolled back — inspect results[].`,
+Produces: Per-record success/failure with sys_ids, plus counts. Not atomic: on failure, already-applied updates are NOT rolled back — inspect results[].
+Optional: preflightAccess: true checks the API user's effective canWrite verdict once before dispatching — table-level, plus the union of requested fields sampled on the FIRST record in the batch (not every row).`,
 	inputSchema: BatchUpdateSchema,
 	outputSchema: BatchOutputSchema,
 };
 
-export function createBatchUpdateTool(batchService: BatchService, schemaService?: SchemaService) {
+export function createBatchUpdateTool(
+	batchService: BatchService,
+	schemaService?: SchemaService,
+	accessReader?: EffectiveAccessReader,
+) {
 	return {
 		...BATCH_UPDATE_TOOL,
 		handler: async (params: unknown, server?: Server) => {
@@ -62,6 +68,24 @@ export function createBatchUpdateTool(batchService: BatchService, schemaService?
 				);
 				if (message) {
 					return { content: [{ type: 'text' as const, text: message }], isError: true as const };
+				}
+
+				// Opt-in pre-flight. One probe for the batch: the table verdict applies to
+				// every row, and the field verdicts are sampled on the first record rather
+				// than paying a round trip per sys_id.
+				const accessDenial = await preflightEffectiveAccess(accessReader, {
+					operation: 'update',
+					tableName: validated.tableName,
+					fields: collectFieldNames(validated.updates.map((u) => u.fields)),
+					recordQuery: `sys_id=${validated.updates[0].sysId}`,
+					instance: validated.instance,
+					enabled: validated.preflightAccess,
+				});
+				if (accessDenial) {
+					return {
+						content: [{ type: 'text' as const, text: accessDenial }],
+						isError: true as const,
+					};
 				}
 
 				// Perform batch update

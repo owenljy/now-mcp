@@ -8,6 +8,7 @@ import {
 	acknowledgeRoutingRiskField,
 	continueOnErrorField,
 	instanceField,
+	preflightAccessField,
 	skipFieldValidationField,
 	sysIdField,
 	tableNameField,
@@ -51,6 +52,7 @@ export const BatchCreateSchema = z.object({
 	continueOnError: continueOnErrorField,
 	skipFieldValidation: skipFieldValidationField,
 	acknowledgeRoutingRisk: acknowledgeRoutingRiskField,
+	preflightAccess: preflightAccessField,
 });
 
 export type BatchCreateInput = z.infer<typeof BatchCreateSchema>;
@@ -76,6 +78,7 @@ export const BatchUpdateSchema = z.object({
 	updateType: updateTypeField,
 	continueOnError: continueOnErrorField,
 	skipFieldValidation: skipFieldValidationField,
+	preflightAccess: preflightAccessField,
 });
 
 export type BatchUpdateInput = z.infer<typeof BatchUpdateSchema>;

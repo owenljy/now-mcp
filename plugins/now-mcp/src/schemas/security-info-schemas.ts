@@ -27,7 +27,17 @@ export const GetSecurityInfoSchema = z.object({
 		.array(z.string().regex(/^[a-zA-Z0-9_]+$/))
 		.max(50)
 		.optional()
-		.describe('Optional field names; retain table ACLs plus ACLs for these fields.'),
+		.describe(
+			'Optional field names; retain table ACLs plus ACLs for these fields, and resolve field-level effective access for them.',
+		),
+	recordSysId: z
+		.string()
+		.length(32)
+		.regex(/^[a-f0-9]{32}$/i)
+		.optional()
+		.describe(
+			'Optional record to evaluate field-level effective access against, instead of an arbitrary row.',
+		),
 });
 
 export type GetSecurityInfoInput = z.infer<typeof GetSecurityInfoSchema>;
@@ -65,6 +75,49 @@ export const GetSecurityInfoOutputSchema = z.object({
 			hasScript: z.boolean(),
 		}),
 	),
+	/**
+	 * The platform's own access verdict for the user this MCP authenticates as.
+	 *
+	 * This is the *whether*; the ACL inventory above is the *why*. `available:
+	 * false` means the verdict could not be obtained (GraphQL disabled, table not
+	 * exposed) — it never means access is denied. Table-level verdicts need no row;
+	 * field-level ones are read off a sample record, so `fieldVerdicts` says
+	 * whether one was available.
+	 */
+	effectiveAccess: z.union([
+		z.object({
+			available: z.literal(true),
+			source: z.string(),
+			identity: z.string(),
+			evaluatedAgainstRecord: z.string().optional(),
+			table: z.object({
+				label: z.string().optional(),
+				plural: z.string().optional(),
+				canRead: z.boolean().nullable(),
+				canWrite: z.boolean().nullable(),
+				canCreate: z.boolean().nullable(),
+				canDelete: z.boolean().nullable(),
+				auditWanted: z.boolean().nullable(),
+			}),
+			fields: z.array(
+				z.object({
+					field: z.string(),
+					label: z.string().optional(),
+					internalType: z.string().optional(),
+					isMandatory: z.boolean().nullable(),
+					canRead: z.boolean().nullable(),
+					canWrite: z.boolean().nullable(),
+				}),
+			),
+			fieldVerdicts: z.enum(['resolved', 'not_requested', 'no_sample_row']),
+			unresolvedFields: z.array(z.string()),
+			note: z.string(),
+		}),
+		z.object({
+			available: z.literal(false),
+			reason: z.string(),
+		}),
+	]),
 	rolesByOperation: z.record(z.array(z.string())),
 	roleRequirements: z.array(OpenRecord).optional(),
 	dataPolicies: z.array(OpenRecord),

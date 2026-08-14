@@ -207,14 +207,15 @@ Reads and writes go over the REST Table/Stats/Attachment APIs. Two additions:
   create/update/delete calls in one request instead of one request per record.
   Instances without the endpoint fall back to the original looped path
   automatically (decided before anything is written, so nothing double-applies).
-- **GraphQL** (`/api/now/graphql`) backs `expand` only. It is an internal
-  transport, not a tool: raw GraphQL would hand the model a surface where errors
-  arrive as HTTP 200 with an `errors` array, where the schema spans ~6,200 tables
-  with introspection disabled by default, and where an unknown field resolves to
-  `null` silently. What it buys is a true total row count independent of
-  pagination and per-field control over value vs. display value. **Writes stay on
-  REST** — a GraphQL mutation can report success with a null result and needs a
-  re-read to confirm, which is strictly worse than the REST response.
+- **GraphQL** (`/api/now/graphql`) backs `expand` and the effective-access
+  verdicts described below. It is an internal transport, not a tool: raw GraphQL
+  would hand the model a surface where errors arrive as HTTP 200 with an `errors`
+  array, where the schema spans ~6,200 tables with introspection disabled by
+  default, and where an unknown field resolves to `null` silently. What it buys is
+  a true total row count independent of pagination, per-field control over value
+  vs. display value, and the platform's own per-caller access verdict. **Writes
+  stay on REST** — a GraphQL mutation can report success with a null result and
+  needs a re-read to confirm, which is strictly worse than the REST response.
 
 ### Schema discovery
 | Tool | What it does |
@@ -223,8 +224,8 @@ Reads and writes go over the REST Table/Stats/Attachment APIs. Two additions:
 | `sn_get_table_structure_from_data` | Infer structure by **sampling real rows** — fallback when `sys_dictionary` is thin/incomplete |
 | `sn_list_tables` | List/filter tables |
 | `sn_get_choice_list` | Valid choice values for a field |
-| `sn_get_security_info` | Consolidated table security posture — ACLs (table + field), role requirements, data policies, security business rules |
-| `sn_diagnose_mutation` | Read-only mutation preflight: record/field capabilities, before BR abort risks, effective ACL coverage (write mapping, inheritance, wildcards, roles), and reference dependencies |
+| `sn_get_security_info` | Consolidated table security posture — the API user's **effective** access verdict (table + field), plus the ACLs, role requirements, data policies and security business rules behind it |
+| `sn_diagnose_mutation` | Read-only mutation preflight **as the background-script identity**: record/field capabilities, before BR abort risks, effective ACL coverage (write mapping, inheritance, wildcards, roles), and reference dependencies |
 
 `sn_get_security_info` includes `aclRoleGroups`. Roles attached to one ACL are
 reported as `requiredRolesAnyOf`; they are alternatives, not an all-of list.
@@ -232,6 +233,35 @@ The flattened `rolesByOperation` field is only an inventory: matching table and
 field ACLs plus each ACL's role, condition, and script checks still participate
 in access evaluation. `adminOverrides: false` means `admin` does not
 automatically bypass that ACL.
+
+#### Effective access: whether, not just why
+
+Reading `sys_security_acl` tells you which rules exist. It cannot tell you what
+they add up to for a given caller — so `sn_get_security_info` also returns
+`effectiveAccess`: ServiceNow's own `canRead`/`canWrite`/`canCreate`/`canDelete`
+verdict for the user this MCP authenticates as, plus per-field `canRead`/
+`canWrite` for any `fields` you pass (`recordSysId` pins which record those field
+verdicts describe). Measured on a demo instance as **admin**:
+`sys_security_acl` comes back `canWrite=canCreate=canDelete=false`, because
+instances do carry ACLs with `admin_overrides: false`. Absence is never a denial:
+if the verdict cannot be obtained, the section says `available: false` with a
+reason, and an unknown field name lands in `unresolvedFields` rather than being
+reported as read-only.
+
+Two consequences worth knowing:
+
+- `sn_create_record`, `sn_update_record`, `sn_batch_create` and `sn_batch_update`
+  accept `preflightAccess: true`, which asks for that verdict first and refuses
+  locally — with the verdict quoted — instead of discovering the denial as a 403
+  (or as a 200 that persisted nothing). Off by default: it costs one round trip,
+  and only an explicit `false` blocks. If the probe itself fails, the write
+  proceeds exactly as before.
+- `sn_diagnose_mutation` answers for a **different user**. It runs over the
+  background-script transport, whose identity is `system` (admin + snc_internal),
+  and it now reports that identity in `identity`. Same table, two answers:
+  `sys_security_acl` is read-only for the API user and `RWCD` under the
+  background script — so a green verdict there does not mean the write tools can
+  perform the write.
 
 ### Execution & files
 | Tool | What it does |
@@ -396,8 +426,11 @@ to pin the YAML's own `default` instead.
   ServiceNow `write` ACL operation and inspects exact, inherited, field, and
   wildcard coverage. No visible effective ACL is reported as
   `missing_acl_coverage`; unreadable security metadata is reported as unknown,
-  never incorrectly as absent. ACL remediation remains an app-definition
-  change and should go through Fluent/source control rather than a bypass.
+  never incorrectly as absent. Its verdicts belong to the background-script
+  identity it reports in `identity`, not to the API user — for that user's
+  verdict use `effectiveAccess` on `sn_get_security_info`, or `preflightAccess`
+  on the write. ACL remediation remains an app-definition change and should go
+  through Fluent/source control rather than a bypass.
 - **Two-step metadata approval.** Background scripts require `allowWrites: true`
   for data writes and the additional `allowMetadataWrites: true` break-glass
   approval for metadata/security/config tables such as `sys_security_acl`.

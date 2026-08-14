@@ -6,6 +6,7 @@ import { CreateRecordOutputSchema } from '../schemas/output-schemas.js';
 import { CreateRecordSchema } from '../schemas/table-schemas.js';
 import type { SchemaService } from '../services/schema-service.js';
 import type { TableService } from '../services/table-service.js';
+import { type EffectiveAccessReader, preflightEffectiveAccess } from '../utils/access-preflight.js';
 import { formatErrorForTool } from '../utils/error-handler.js';
 import { failureHints, renderHints } from '../utils/failure-enrichment.js';
 import { preflightFieldValidation } from '../utils/field-validation.js';
@@ -20,12 +21,17 @@ export const CREATE_RECORD_TOOL = {
 When to use: To create data records (incident, sys_user, etc.). Do NOT use it to author app metadata (business rules, ACLs, UI policies) — that belongs in the Fluent SDK.
 When NOT to use: cmdb_ci* — a direct insert bypasses the Identification and Reconciliation Engine and creates duplicate CIs; use /api/now/identifyreconcile. sc_request / sc_req_item / sc_task — a direct insert produces a request no workflow ever picks up; use the Service Catalog order API. Both are blocked here with the correct call named in the error.
 Preconditions: Write-enabled instance (readOnly: false); field names valid for the table (validated automatically).
-Produces: sys_id plus the fields you set (not the whole freshly-created row).`,
+Produces: sys_id plus the fields you set (not the whole freshly-created row).
+Optional: preflightAccess: true asks ServiceNow for the API user's effective canCreate verdict first and refuses locally if it is false — useful on tables where an ACL with admin_overrides=false denies even admin.`,
 	inputSchema: CreateRecordSchema,
 	outputSchema: CreateRecordOutputSchema,
 };
 
-export function createCreateRecordTool(tableService: TableService, schemaService?: SchemaService) {
+export function createCreateRecordTool(
+	tableService: TableService,
+	schemaService?: SchemaService,
+	accessReader?: EffectiveAccessReader,
+) {
 	return {
 		...CREATE_RECORD_TOOL,
 		handler: async (params: unknown) => {
@@ -61,6 +67,22 @@ export function createCreateRecordTool(tableService: TableService, schemaService
 				);
 				if (message) {
 					return { content: [{ type: 'text' as const, text: message }], isError: true as const };
+				}
+
+				// Opt-in pre-flight: ask the platform whether this caller may insert here
+				// at all, so a denial is explained before the request instead of arriving
+				// as a 403 (or a 200 that persisted nothing).
+				const accessDenial = await preflightEffectiveAccess(accessReader, {
+					operation: 'create',
+					tableName: validated.tableName,
+					instance: validated.instance,
+					enabled: validated.preflightAccess,
+				});
+				if (accessDenial) {
+					return {
+						content: [{ type: 'text' as const, text: accessDenial }],
+						isError: true as const,
+					};
 				}
 
 				// Create record

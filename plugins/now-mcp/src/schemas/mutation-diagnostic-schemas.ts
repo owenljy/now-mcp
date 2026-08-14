@@ -19,6 +19,12 @@ export const DiagnoseMutationOutputSchema = z.object({
 	table: z.string(),
 	sysId: z.string(),
 	operation: z.string(),
+	/**
+	 * Who the diagnostic ran as. Every verdict below is this user's, and the
+	 * background-script identity is usually more privileged than the REST user the
+	 * write tools authenticate as.
+	 */
+	identity: OpenRecord,
 	recordExists: z.boolean(),
 	capabilities: OpenRecord,
 	fieldCapabilities: z.array(OpenRecord),

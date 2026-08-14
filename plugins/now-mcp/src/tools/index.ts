@@ -151,8 +151,9 @@ export async function registerTools(
 	const scriptService = new ScriptService(instanceManager);
 	const batchService = new BatchService(instanceManager);
 	const schemaService = new SchemaService(instanceManager);
-	// Read-only GraphQL transport, used by sn_query_records for `expand`. Not a
-	// tool of its own — see services/graphql-service.ts for why raw GraphQL is
+	// Read-only GraphQL transport: `expand` on sn_query_records, plus the
+	// effective-ACL verdicts the security and write tools ask for. Not a tool of
+	// its own — see services/graphql-service.ts for why raw GraphQL is
 	// deliberately not exposed.
 	const graphqlService = new GraphqlService(instanceManager);
 
@@ -160,16 +161,16 @@ export async function registerTools(
 		// Table operations (runtime data)
 		createQueryRecordsTool(tableService, schemaService, graphqlService),
 		createAggregateRecordsTool(tableService, schemaService),
-		createCreateRecordTool(tableService, schemaService),
-		createUpdateRecordTool(tableService, schemaService),
+		createCreateRecordTool(tableService, schemaService, graphqlService),
+		createUpdateRecordTool(tableService, schemaService, graphqlService),
 		// One tool for one record or many: cardinality is data, not a different
 		// operation. Deletes route through BatchService so a single delete and a
 		// fifty-record delete share the same verification path.
 		createDeleteRecordsTool(batchService),
 
 		// Batch operations
-		createBatchCreateTool(batchService, schemaService),
-		createBatchUpdateTool(batchService, schemaService),
+		createBatchCreateTool(batchService, schemaService, graphqlService),
+		createBatchUpdateTool(batchService, schemaService, graphqlService),
 
 		// Schema discovery
 		createGetTableSchemaTool(schemaService),
@@ -180,7 +181,7 @@ export async function registerTools(
 
 		// Comparison & security posture (read-only observation)
 		createDiffRecordsTool(tableService),
-		createGetSecurityInfoTool(tableService),
+		createGetSecurityInfoTool(tableService, graphqlService),
 		createDiagnoseMutationTool(scriptService),
 		createGetRuntimeEventsTool(tableService),
 

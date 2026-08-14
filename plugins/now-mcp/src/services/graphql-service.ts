@@ -22,6 +22,15 @@
  * "incident plus the caller's name and email" is one round trip instead of two,
  * and each field can be asked for as a raw value or a display value
  * independently rather than doubling the whole payload with display_value=all.
+ *
+ * The second thing it buys us is `_table_metadata` / the per-field metadata
+ * leaves: ServiceNow's OWN access verdict for the authenticated caller, on the
+ * caller's own credentials. That is a different kind of answer from anything
+ * `sys_security_acl` can give — reading ACL rows tells you which rules exist,
+ * not what they add up to for this user (measured on a live instance: the API
+ * admin gets canWrite/canCreate/canDelete=false on sys_security_acl, because
+ * ACLs with admin_overrides=false apply to admin too). See
+ * `fetchEffectiveAccess` below.
  */
 
 import type { InstanceManager } from '../client/instance-manager.js';
@@ -41,6 +50,7 @@ interface GraphqlEnvelope {
 interface GlideRecordResult {
 	_rowCount?: number;
 	_results?: Array<Record<string, unknown>>;
+	_table_metadata?: Record<string, unknown> | null;
 }
 
 /** A GraphQL scalar leaf as the GlideRecord namespace returns it. */
@@ -65,6 +75,56 @@ export interface GraphqlQueryResult {
 	records: ServiceNowRecord[];
 	/** True total matching the query, independent of pagination. */
 	totalCount: number | null;
+}
+
+export interface EffectiveAccessOptions {
+	/** Fields to resolve field-level verdicts for. Omit for table-level only. */
+	fields?: string[];
+	/**
+	 * Encoded query pinning the row the field verdicts should describe. Without
+	 * it, verdicts come from whichever row the table returns first, which is only
+	 * an approximation when an ACL condition or script varies per record.
+	 */
+	recordQuery?: string;
+}
+
+/** Table-level verdict as `_table_metadata` reports it for the calling user. */
+export interface TableAccessVerdict {
+	label?: string;
+	plural?: string;
+	canRead: boolean | null;
+	canWrite: boolean | null;
+	canCreate: boolean | null;
+	canDelete: boolean | null;
+	auditWanted: boolean | null;
+}
+
+/** Field-level verdict, read off the field leaf of a sample row. */
+export interface FieldAccessVerdict {
+	field: string;
+	label?: string;
+	internalType?: string;
+	isMandatory: boolean | null;
+	canRead: boolean | null;
+	canWrite: boolean | null;
+}
+
+/**
+ * Why field verdicts are or aren't present. `no_sample_row` matters: field
+ * metadata only exists on a row, so a table (or filter) that returns nothing
+ * yields no field verdicts — which must not be read as "denied".
+ */
+export type FieldVerdictStatus = 'resolved' | 'not_requested' | 'no_sample_row';
+
+export interface EffectiveAccessResult {
+	table: TableAccessVerdict;
+	fields: FieldAccessVerdict[];
+	fieldVerdicts: FieldVerdictStatus;
+	/**
+	 * Requested fields whose leaf came back null. GraphQL does that for a field
+	 * that does not exist, with no error — so these are unknown names, NOT denials.
+	 */
+	unresolvedFields: string[];
 }
 
 /**
@@ -158,6 +218,48 @@ export function buildGlideRecordQuery(tableName: string, options: GraphqlQueryOp
 	);
 }
 
+/** The 7 fields `_table_metadata` exposes — verified by probing; there are no others. */
+const TABLE_METADATA_SELECTION = 'label plural canRead canWrite canCreate canDelete auditWanted';
+
+/**
+ * Field-level metadata are FLAT SCALARS on the field leaf, not a nested
+ * `_metadata` object — `_metadata`, `_columns`, `_field_metadata` and friends are
+ * all undefined on this schema.
+ */
+const FIELD_METADATA_SELECTION = 'label internalType isMandatory canRead canWrite';
+
+/**
+ * Build the document that asks ServiceNow what the CALLING USER may do here.
+ *
+ * `_table_metadata` needs no arguments and no row. Field verdicts do need a row,
+ * because they live on the field leaves inside `_results` — hence the limit-1
+ * page, and hence `recordQuery` when the verdicts should describe one specific
+ * record rather than an arbitrary one.
+ */
+export function buildEffectiveAccessQuery(
+	tableName: string,
+	options: EffectiveAccessOptions = {},
+): string {
+	assertIdentifier(tableName, 'table name');
+
+	const fields = options.fields ?? [];
+	const selections = [`_table_metadata { ${TABLE_METADATA_SELECTION} }`];
+	const args: string[] = [];
+	if (options.recordQuery) {
+		args.push(`queryConditions: ${JSON.stringify(options.recordQuery)}`);
+	}
+	if (fields.length > 0) {
+		args.push('pagination: {limit: 1, offset: 0}');
+		const leaves = fields
+			.map((field) => `${assertIdentifier(field, 'field name')} { ${FIELD_METADATA_SELECTION} }`)
+			.join(' ');
+		selections.push(`_results { ${leaves} }`);
+	}
+
+	const argList = args.length > 0 ? `(${args.join(', ')})` : '';
+	return `{ GlideRecord_Query { ${tableName}${argList} { ${selections.join(' ')} } } }`;
+}
+
 /**
  * Flatten one GraphQL row into the Table-API-shaped record the tools already
  * emit, so `expand` changes what is fetched without changing the result contract
@@ -218,15 +320,15 @@ export class GraphqlService {
 	 * @throws GraphqlUnavailableError when the instance can't serve GraphQL at all
 	 * @throws ServiceNowError when the query itself was rejected
 	 */
-	async queryRecords(
-		tableName: string,
-		options: GraphqlQueryOptions,
+	/**
+	 * POST one document and return the `GlideRecord_Query` map, converting both
+	 * transport and in-band failures into the two error types callers switch on.
+	 */
+	private async run(
+		document: string,
 		instance?: string,
-	): Promise<GraphqlQueryResult> {
+	): Promise<Record<string, GlideRecordResult | null>> {
 		const client = this.instanceManager.getClient(instance);
-		const document = buildGlideRecordQuery(tableName, options);
-
-		logger.debug(`GraphQL query on ${tableName}`, { instance: instance || 'default' });
 
 		let envelope: GraphqlEnvelope;
 		try {
@@ -253,7 +355,19 @@ export class GraphqlService {
 			throw new ServiceNowError(`GraphQL query failed: ${messages.join('; ')}`, 400);
 		}
 
-		const result = envelope.data?.GlideRecord_Query?.[tableName];
+		return envelope.data?.GlideRecord_Query ?? {};
+	}
+
+	async queryRecords(
+		tableName: string,
+		options: GraphqlQueryOptions,
+		instance?: string,
+	): Promise<GraphqlQueryResult> {
+		const document = buildGlideRecordQuery(tableName, options);
+
+		logger.debug(`GraphQL query on ${tableName}`, { instance: instance || 'default' });
+
+		const result = (await this.run(document, instance))[tableName];
 		if (!result) {
 			throw new GraphqlUnavailableError(
 				`GraphQL returned no GlideRecord result for table '${tableName}'.`,
@@ -266,4 +380,96 @@ export class GraphqlService {
 			totalCount: typeof result._rowCount === 'number' ? result._rowCount : null,
 		};
 	}
+
+	/**
+	 * Ask ServiceNow what the authenticated caller may actually do on this table.
+	 *
+	 * This is the platform's own verdict, evaluated on the credentials this MCP
+	 * connects with — not an inference from ACL rows, and not the more-privileged
+	 * background-script identity `sn_diagnose_mutation` reports on.
+	 *
+	 * @throws GraphqlUnavailableError when the instance can't serve GraphQL at all
+	 * @throws ServiceNowError when the table itself resolved to null
+	 */
+	async fetchEffectiveAccess(
+		tableName: string,
+		options: EffectiveAccessOptions = {},
+		instance?: string,
+	): Promise<EffectiveAccessResult> {
+		const document = buildEffectiveAccessQuery(tableName, options);
+
+		logger.debug(`GraphQL effective-access probe on ${tableName}`, {
+			instance: instance || 'default',
+		});
+
+		const map = await this.run(document, instance);
+		if (!(tableName in map)) {
+			throw new GraphqlUnavailableError(
+				`GraphQL returned no GlideRecord result for table '${tableName}'.`,
+			);
+		}
+		const result = map[tableName];
+		// A table that does not exist resolves to null with NO error — the same
+		// silent shape an unknown field takes. Say so, rather than let a missing
+		// verdict be read as a denial.
+		if (!result) {
+			throw new ServiceNowError(
+				`GraphQL resolved table '${tableName}' to null — the table does not exist or is not exposed to this caller.`,
+				404,
+			);
+		}
+
+		const metadata = result._table_metadata ?? {};
+		const table: TableAccessVerdict = {
+			label: textOf(metadata.label),
+			plural: textOf(metadata.plural),
+			canRead: boolOf(metadata.canRead),
+			canWrite: boolOf(metadata.canWrite),
+			canCreate: boolOf(metadata.canCreate),
+			canDelete: boolOf(metadata.canDelete),
+			auditWanted: boolOf(metadata.auditWanted),
+		};
+
+		const requested = options.fields ?? [];
+		if (requested.length === 0) {
+			return { table, fields: [], fieldVerdicts: 'not_requested', unresolvedFields: [] };
+		}
+
+		const row = result._results?.[0];
+		if (!row) {
+			return { table, fields: [], fieldVerdicts: 'no_sample_row', unresolvedFields: [] };
+		}
+
+		const fields: FieldAccessVerdict[] = [];
+		const unresolvedFields: string[] = [];
+		for (const field of requested) {
+			const leaf = row[field] as Record<string, unknown> | null | undefined;
+			if (!leaf) {
+				unresolvedFields.push(field);
+				continue;
+			}
+			fields.push({
+				field,
+				label: textOf(leaf.label),
+				internalType: textOf(leaf.internalType),
+				isMandatory: boolOf(leaf.isMandatory),
+				canRead: boolOf(leaf.canRead),
+				canWrite: boolOf(leaf.canWrite),
+			});
+		}
+
+		return { table, fields, fieldVerdicts: 'resolved', unresolvedFields };
+	}
+}
+
+/** A metadata scalar, or null when GraphQL omitted it (never coerced to false). */
+function boolOf(value: unknown): boolean | null {
+	if (typeof value === 'boolean') return value;
+	if (value === 'true') return true;
+	if (value === 'false') return false;
+	return null;
+}
+
+function textOf(value: unknown): string | undefined {
+	return typeof value === 'string' && value.length > 0 ? value : undefined;
 }

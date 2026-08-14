@@ -4,14 +4,22 @@
  *
  * Read-only. Orchestrates several tableService.queryRecords calls; each section
  * degrades independently so one missing permission only empties that section.
+ *
+ * Two kinds of answer live here and they must not be confused. Everything read
+ * out of `sys_security_acl` is an INVENTORY of rules — it explains *why* access
+ * is shaped the way it is, but no amount of row-reading combines those rules into
+ * a decision. `effectiveAccess` is the decision: ServiceNow's own verdict for the
+ * user this MCP authenticates as, obtained from GraphQL's `_table_metadata`.
  */
 
 import {
 	GetSecurityInfoOutputSchema,
 	GetSecurityInfoSchema,
 } from '../schemas/security-info-schemas.js';
+import type { EffectiveAccessResult } from '../services/graphql-service.js';
 import type { TableService } from '../services/table-service.js';
 import type { ServiceNowRecord } from '../types/servicenow.js';
+import type { EffectiveAccessReader } from '../utils/access-preflight.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
 import { toolResult } from '../utils/tool-response.js';
@@ -22,12 +30,24 @@ export const GET_SECURITY_INFO_TOOL = {
 	description: `What: A consolidated view of what protects a table — ACLs (access controls), per-ACL role alternatives, active data policies, and security-related business rules.
 When to use: To understand why access to a table/field is granted or denied, or to audit a table's security posture, without querying each security table separately.
 Preconditions: The table should exist. Read access to the security metadata tables (sys_security_acl, sys_data_policy2, sys_script) — a section you cannot read is returned empty with a note in warnings, the call still succeeds.
-Produces (default, includeDetails=false): acls {total, byOperation, tableLevel, fieldLevel}, aclRoleGroups (the roles attached to each ACL are any-of alternatives), rolesByOperation (a lossy inventory only—not a combined requirement), dataPolicies, securityBusinessRules, warnings. ACL role, condition, and script checks on one ACL are conjunctive; admin only bypasses an ACL when adminOverrides is true. Pass includeDetails=true to also get the raw ACL and ACL-role rows.`,
+Produces (default, includeDetails=false): effectiveAccess (see below), acls {total, byOperation, tableLevel, fieldLevel}, aclRoleGroups (the roles attached to each ACL are any-of alternatives), rolesByOperation (a lossy inventory only—not a combined requirement), dataPolicies, securityBusinessRules, warnings. ACL role, condition, and script checks on one ACL are conjunctive; admin only bypasses an ACL when adminOverrides is true. Pass includeDetails=true to also get the raw ACL and ACL-role rows.
+effectiveAccess is the one section that answers WHETHER rather than why: ServiceNow's own canRead/canWrite/canCreate/canDelete verdict for the user this MCP authenticates as (plus per-field canRead/canWrite when you pass fields). Trust it over any reading of the ACL rows — instances do carry ACLs with admin_overrides=false, so even an admin gets false here. It is the API user's verdict specifically; sn_diagnose_mutation reports the background-script identity, which usually differs.`,
 	inputSchema: GetSecurityInfoSchema,
 	outputSchema: GetSecurityInfoOutputSchema,
 };
 
-export function createGetSecurityInfoTool(tableService: TableService) {
+/** Verbatim in the response so a caller cannot mistake one answer for the other. */
+const EFFECTIVE_ACCESS_NOTE =
+	'ServiceNow evaluated this for the credentials this MCP connects with. It is the ' +
+	'decision; the ACL sections explain how it was reached. A null verdict means the ' +
+	'platform did not report that flag, not that access is denied. Field verdicts are ' +
+	'read off one sample record, so a per-record ACL condition is only reflected when ' +
+	'recordSysId pins the record you care about.';
+
+export function createGetSecurityInfoTool(
+	tableService: TableService,
+	accessReader?: EffectiveAccessReader,
+) {
 	return {
 		...GET_SECURITY_INFO_TOOL,
 		handler: async (params: unknown) => {
@@ -72,66 +92,98 @@ export function createGetSecurityInfoTool(tableService: TableService) {
 					}
 				};
 
-				const [aclResult, dataPolicyResult, businessRuleResult, beforeBrResult, dictionaryResult] =
-					await Promise.all([
-						safeQuery(
-							'sys_security_acl',
-							`name=${t}^ORnameLIKE${t}.`,
-							[
-								'sys_id',
-								'name',
-								'operation',
-								'type',
-								'active',
-								'admin_overrides',
-								'condition',
-								'script',
-							],
-							100,
-						),
-						safeQuery(
-							'sys_data_policy2',
-							`model_table=${t}^active=true`,
-							['sys_id', 'short_description', 'enforce_ui', 'enforce_scripting'],
-							50,
-						),
-						safeQuery(
-							'sys_script',
-							`collection=${t}^active=true^scriptLIKEgs.hasRole^ORscriptLIKEgs.getUser`,
-							['sys_id', 'name', 'when', 'collection'],
-							30,
-						),
-						safeQuery(
-							'sys_script',
-							`collection=${t}^active=true^when=before`,
-							[
-								'sys_id',
-								'name',
-								'when',
-								'order',
-								'action_update',
-								'action_delete',
-								'filter_condition',
-								'script',
-							],
-							100,
-						),
-						safeQuery(
-							'sys_dictionary',
-							`name=${t}^elementISNOTEMPTY`,
-							[
-								'sys_id',
-								'name',
-								'element',
-								'internal_type',
-								'reference',
-								'reference_cascade_rule',
-								'read_only',
-								'mandatory',
-							],
-							300,
-						),
-					]);
+				// The effective-access probe. It rides along with the ACL reads because it
+				// is a different endpoint (GraphQL, not the Table API), so it adds no
+				// wall-clock — and it degrades to a reason string rather than an error,
+				// like every other section here.
+				const accessProbe = async (): Promise<
+					{ ok: true; result: EffectiveAccessResult } | { ok: false; reason: string }
+				> => {
+					if (!accessReader) {
+						return { ok: false, reason: 'This tool was built without a GraphQL read channel.' };
+					}
+					try {
+						const result = await accessReader.fetchEffectiveAccess(
+							t,
+							{
+								fields,
+								recordQuery: validated.recordSysId ? `sys_id=${validated.recordSysId}` : undefined,
+							},
+							instance,
+						);
+						return { ok: true, result };
+					} catch (error) {
+						return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+					}
+				};
+
+				const [
+					aclResult,
+					dataPolicyResult,
+					businessRuleResult,
+					beforeBrResult,
+					dictionaryResult,
+					accessResult,
+				] = await Promise.all([
+					safeQuery(
+						'sys_security_acl',
+						`name=${t}^ORnameLIKE${t}.`,
+						[
+							'sys_id',
+							'name',
+							'operation',
+							'type',
+							'active',
+							'admin_overrides',
+							'condition',
+							'script',
+						],
+						100,
+					),
+					safeQuery(
+						'sys_data_policy2',
+						`model_table=${t}^active=true`,
+						['sys_id', 'short_description', 'enforce_ui', 'enforce_scripting'],
+						50,
+					),
+					safeQuery(
+						'sys_script',
+						`collection=${t}^active=true^scriptLIKEgs.hasRole^ORscriptLIKEgs.getUser`,
+						['sys_id', 'name', 'when', 'collection'],
+						30,
+					),
+					safeQuery(
+						'sys_script',
+						`collection=${t}^active=true^when=before`,
+						[
+							'sys_id',
+							'name',
+							'when',
+							'order',
+							'action_update',
+							'action_delete',
+							'filter_condition',
+							'script',
+						],
+						100,
+					),
+					safeQuery(
+						'sys_dictionary',
+						`name=${t}^elementISNOTEMPTY`,
+						[
+							'sys_id',
+							'name',
+							'element',
+							'internal_type',
+							'reference',
+							'reference_cascade_rule',
+							'read_only',
+							'mandatory',
+						],
+						300,
+					),
+					accessProbe(),
+				]);
 
 				const aclRecords = aclResult.records.filter((acl) => {
 					const operation = String(acl.operation ?? '');
@@ -255,6 +307,42 @@ export function createGetSecurityInfoTool(tableService: TableService) {
 					};
 				});
 
+				// Assemble the verdict section. Unavailability is stated explicitly rather
+				// than omitted, so a missing section can never be read as "denied".
+				let effectiveAccess: Record<string, unknown>;
+				if (accessResult.ok) {
+					const access = accessResult.result;
+					effectiveAccess = {
+						available: true,
+						source: 'graphql _table_metadata and per-field metadata',
+						identity: 'the ServiceNow user this MCP authenticates as',
+						...(validated.recordSysId ? { evaluatedAgainstRecord: validated.recordSysId } : {}),
+						table: access.table,
+						fields: access.fields,
+						fieldVerdicts: access.fieldVerdicts,
+						unresolvedFields: access.unresolvedFields,
+						note: EFFECTIVE_ACCESS_NOTE,
+					};
+					if (access.fieldVerdicts === 'no_sample_row') {
+						warnings.push(
+							`No field-level effective access for ${t}: field verdicts live on a record, and ` +
+								`${validated.recordSysId ? `record ${validated.recordSysId}` : 'this table'} returned no readable row.`,
+						);
+					}
+					if (access.unresolvedFields.length > 0) {
+						warnings.push(
+							`No effective-access verdict for field(s) ${access.unresolvedFields.join(', ')} on ${t} — ` +
+								`GraphQL returns null for a field that does not exist, so these names are probably wrong.`,
+						);
+					}
+				} else {
+					effectiveAccess = { available: false, reason: accessResult.reason };
+					warnings.push(
+						`Effective access could not be determined: ${accessResult.reason}. The ACL sections below ` +
+							`describe the rules, not the resulting verdict — do not read this as denied access.`,
+					);
+				}
+
 				const acls: Record<string, unknown> = {
 					total: aclRecords.length,
 					byOperation,
@@ -264,6 +352,7 @@ export function createGetSecurityInfoTool(tableService: TableService) {
 				const response: Record<string, unknown> = {
 					success: true,
 					table: t,
+					effectiveAccess,
 					acls,
 					aclRoleGroups,
 					rolesByOperation,
@@ -283,9 +372,20 @@ export function createGetSecurityInfoTool(tableService: TableService) {
 					response.warnings = warnings;
 				}
 
+				// Lead the one-line summary with the verdict, in the compact RWCD form: it
+				// is the answer most callers came for. A denied flag shows as '.'.
+				const verdict = accessResult.ok
+					? ['canRead', 'canWrite', 'canCreate', 'canDelete']
+							.map((flag, i) => {
+								const value = accessResult.result.table[flag as 'canRead'];
+								return value === true ? 'RWCD'[i] : value === false ? '.' : '?';
+							})
+							.join('')
+					: 'unknown';
+
 				return toolResult(
 					response,
-					`${aclRecords.length} ACL(s), ${dataPolicyResult.records.length} data policy(ies) on ${t}${
+					`${t}: effective access ${verdict}; ${aclRecords.length} ACL(s), ${dataPolicyResult.records.length} data policy(ies)${
 						warnings.length > 0 ? ' — see warnings' : ''
 					}`,
 				);

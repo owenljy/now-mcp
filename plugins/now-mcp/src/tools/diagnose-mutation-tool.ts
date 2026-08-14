@@ -12,7 +12,8 @@ export const DIAGNOSE_MUTATION_TOOL = {
 	description: `What: Read-only diagnostics for a record update/delete: runtime canWrite/canDelete, requested field writability, active before business rules (including abort-capable rules), effective ACL coverage (including parent-table and wildcard ACLs), and inbound reference counts.
 When to use: Before changing ACLs or disabling business rules when an update/delete was denied, returned null/false, or failed read-after-write verification.
 Preconditions: Elevated access to the target and security metadata. Uses the background-script transport, but the diagnostic script itself performs no writes.
-	Limitations: This identifies likely blockers; it does not execute a dry-run mutation and cannot prove which rule would abort for a specific proposed value. ACL scripts are reported, not evaluated individually. If security metadata cannot be read, ACL coverage is reported as unknown rather than absent.`,
+	Limitations: This identifies likely blockers; it does not execute a dry-run mutation and cannot prove which rule would abort for a specific proposed value. ACL scripts are reported, not evaluated individually. If security metadata cannot be read, ACL coverage is reported as unknown rather than absent.
+	WHOSE ACCESS: every capability here is evaluated as the background-script identity (reported in \`identity\` — typically \`system\`, admin + snc_internal), NOT as the REST user the other tools write with. Measured on a live instance: sys_security_acl is canWrite=false for the API user and RWCD under the background script. So this tool can report a write will succeed when the API user cannot perform it, and the reverse. For the API user's verdict use sn_get_security_info (effectiveAccess), or preflightAccess: true on the write itself.`,
 	inputSchema: DiagnoseMutationSchema,
 	outputSchema: DiagnoseMutationOutputSchema,
 };
@@ -24,7 +25,10 @@ export function createDiagnoseMutationTool(scriptService: ScriptService) {
 			try {
 				const v = DiagnoseMutationSchema.parse(params);
 				const script = `(function(){
-	var out={recordExists:false,capabilities:{},fieldCapabilities:[],activeBusinessRules:[],applicableAcls:[],aclCoverage:{metadataReadable:false,coverage:'unknown'},referenceDependencies:[]};
+	var out={identity:{},recordExists:false,capabilities:{},fieldCapabilities:[],activeBusinessRules:[],applicableAcls:[],aclCoverage:{metadataReadable:false,coverage:'unknown'},referenceDependencies:[]};
+	// Report WHO this ran as. Every canRead/canWrite below is that user's answer,
+	// and the background-script identity is not the REST user the write tools use.
+	try{out.identity={userName:String(gs.getUserName()||''),userId:String(gs.getUserID()||''),isAdmin:gs.hasRole('admin')};}catch(identityError){out.identity={error:String(identityError)};}
 	var table=${JSON.stringify(v.tableName)}, id=${JSON.stringify(v.sysId)}, requestedOp=${JSON.stringify(v.operation)}, fields=${JSON.stringify(v.fields)};
 	var aclOp=requestedOp==='update'?'write':requestedOp;
 var rec=new GlideRecordSecure(table); out.recordExists=rec.get(id);
@@ -54,6 +58,7 @@ log(JSON.stringify(out));})();`;
 					table: v.tableName,
 					sysId: v.sysId,
 					operation: v.operation,
+					identity: parsed.identity || {},
 					recordExists: !!parsed.recordExists,
 					capabilities: parsed.capabilities || {},
 					fieldCapabilities: parsed.fieldCapabilities || [],
@@ -71,6 +76,9 @@ log(JSON.stringify(out));})();`;
 							: {}),
 					referenceDependencies: parsed.referenceDependencies || [],
 					limitations: [
+						`Evaluated as the background-script identity (${
+							parsed.identity?.userName || 'unknown'
+						}), NOT the REST user the write tools authenticate as — these verdicts can differ in both directions. For the API user's verdict use sn_get_security_info (effectiveAccess).`,
 						'No mutation was attempted.',
 						'ACL scripts and business-rule conditions were not individually evaluated.',
 						'Reference discovery is capped at 100 dictionary fields and 101 rows per dependency.',

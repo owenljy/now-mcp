@@ -6,6 +6,7 @@ import { UpdateRecordOutputSchema } from '../schemas/output-schemas.js';
 import { UpdateRecordSchema } from '../schemas/table-schemas.js';
 import type { SchemaService } from '../services/schema-service.js';
 import type { TableService } from '../services/table-service.js';
+import { type EffectiveAccessReader, preflightEffectiveAccess } from '../utils/access-preflight.js';
 import { formatErrorForTool } from '../utils/error-handler.js';
 import { failureHints, renderHints } from '../utils/failure-enrichment.js';
 import { preflightFieldValidation } from '../utils/field-validation.js';
@@ -18,12 +19,17 @@ export const UPDATE_RECORD_TOOL = {
 	description: `What: Modify an existing record (PATCH partial or PUT full) by sys_id.
 When to use: To change field values on a known record. For app metadata, use the Fluent SDK instead.
 Preconditions: Write-enabled instance (readOnly: false); valid sys_id; field names valid for the table (validated automatically).
-Produces: sys_id plus the fields you changed (not the whole row).`,
+Produces: sys_id plus the fields you changed (not the whole row).
+Optional: preflightAccess: true asks ServiceNow for the API user's effective canWrite verdict on THIS record and on each requested field first, and refuses locally if any is false.`,
 	inputSchema: UpdateRecordSchema,
 	outputSchema: UpdateRecordOutputSchema,
 };
 
-export function createUpdateRecordTool(tableService: TableService, schemaService?: SchemaService) {
+export function createUpdateRecordTool(
+	tableService: TableService,
+	schemaService?: SchemaService,
+	accessReader?: EffectiveAccessReader,
+) {
 	return {
 		...UPDATE_RECORD_TOOL,
 		handler: async (params: unknown) => {
@@ -45,6 +51,24 @@ export function createUpdateRecordTool(tableService: TableService, schemaService
 				);
 				if (message) {
 					return { content: [{ type: 'text' as const, text: message }], isError: true as const };
+				}
+
+				// Opt-in pre-flight. Pinning the row by sys_id matters: field verdicts are
+				// evaluated against a specific record, so an ACL condition that depends on
+				// the row's own data is reflected rather than approximated.
+				const accessDenial = await preflightEffectiveAccess(accessReader, {
+					operation: 'update',
+					tableName: validated.tableName,
+					fields: Object.keys(validated.fields),
+					recordQuery: `sys_id=${validated.sysId}`,
+					instance: validated.instance,
+					enabled: validated.preflightAccess,
+				});
+				if (accessDenial) {
+					return {
+						content: [{ type: 'text' as const, text: accessDenial }],
+						isError: true as const,
+					};
 				}
 
 				// Update record
