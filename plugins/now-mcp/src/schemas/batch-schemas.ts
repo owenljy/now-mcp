@@ -1,19 +1,16 @@
 /**
- * Zod schemas for batch operations validation
+ * Batch-size enforcement and the batch result type.
+ *
+ * The batch INPUT schemas used to live here, back when "many records" was a
+ * separate tool from "one record". They are now the ordinary write schemas in
+ * table-schemas.ts (cardinality is data, not a different operation), so what
+ * remains is the shared cap check they all apply and the result shape
+ * BatchService produces.
  */
 
 import { z } from 'zod';
 import { maxBatchSize } from '../config/batch-config.js';
-import {
-	acknowledgeRoutingRiskField,
-	continueOnErrorField,
-	instanceField,
-	preflightAccessField,
-	skipFieldValidationField,
-	sysIdField,
-	tableNameField,
-	updateTypeField,
-} from './common.js';
+import type { FieldMismatch } from '../utils/write-verification.js';
 
 /**
  * Enforce the configured max-batch-size cap at parse time, reporting the actual
@@ -35,56 +32,11 @@ export function enforceBatchSize(items: unknown[], ctx: z.RefinementCtx): void {
 }
 
 /**
- * Schema for batch creating multiple records
- */
-export const BatchCreateSchema = z.object({
-	instance: instanceField,
-	tableName: tableNameField(),
-	records: z
-		.array(
-			z.record(z.unknown()).refine((data) => Object.keys(data).length > 0, {
-				message: 'Each record must have at least one field',
-			}),
-		)
-		.min(1, 'At least one record is required')
-		.superRefine(enforceBatchSize)
-		.describe('Array of record objects to create'),
-	continueOnError: continueOnErrorField,
-	skipFieldValidation: skipFieldValidationField,
-	acknowledgeRoutingRisk: acknowledgeRoutingRiskField,
-	preflightAccess: preflightAccessField,
-});
-
-export type BatchCreateInput = z.infer<typeof BatchCreateSchema>;
-
-/**
- * Schema for batch updating multiple records
- */
-export const BatchUpdateSchema = z.object({
-	instance: instanceField,
-	tableName: tableNameField(),
-	updates: z
-		.array(
-			z.object({
-				sysId: sysIdField(),
-				fields: z.record(z.unknown()).refine((data) => Object.keys(data).length > 0, {
-					message: 'Fields object must have at least one field',
-				}),
-			}),
-		)
-		.min(1, 'At least one update is required')
-		.superRefine(enforceBatchSize)
-		.describe('Array of update objects with sysId and fields'),
-	updateType: updateTypeField,
-	continueOnError: continueOnErrorField,
-	skipFieldValidation: skipFieldValidationField,
-	preflightAccess: preflightAccessField,
-});
-
-export type BatchUpdateInput = z.infer<typeof BatchUpdateSchema>;
-
-/**
- * Response type for batch operations
+ * Response type for batch operations.
+ *
+ * `verified` / `mismatches` are stamped by the read-after-write checks: a record
+ * the API reported success for but which did not persist is flipped to
+ * `success: false` and carries the fields that disagreed.
  */
 export interface BatchOperationResult {
 	success: boolean;
@@ -96,6 +48,7 @@ export interface BatchOperationResult {
 		sysId?: string;
 		record?: unknown;
 		verified?: boolean;
+		mismatches?: FieldMismatch[];
 		error?: string;
 	}>;
 }

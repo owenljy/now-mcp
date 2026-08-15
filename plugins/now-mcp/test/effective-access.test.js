@@ -7,8 +7,8 @@ import {
 } from '../build/services/graphql-service.js';
 import { preflightEffectiveAccess } from '../build/utils/access-preflight.js';
 import { createGetSecurityInfoTool } from '../build/tools/get-security-info-tool.js';
-import { createUpdateRecordTool } from '../build/tools/update-record-tool.js';
-import { createCreateRecordTool } from '../build/tools/create-record-tool.js';
+import { createUpdateRecordsTool } from '../build/tools/update-records-tool.js';
+import { createCreateRecordsTool } from '../build/tools/create-records-tool.js';
 
 const SYS_ID = 'a'.repeat(32);
 
@@ -354,7 +354,7 @@ test('an unknown field name is warned about rather than reported as denied', asy
   );
 });
 
-test('sn_update_record refuses before any HTTP call when the pre-flight denies', async () => {
+test('sn_update_records refuses before any HTTP call when the pre-flight denies', async () => {
   const tableService = {
     async updateRecord() {
       throw new Error('updateRecord must not be reached');
@@ -376,10 +376,9 @@ test('sn_update_record refuses before any HTTP call when the pre-flight denies',
     },
   };
 
-  const result = await createUpdateRecordTool(tableService, undefined, reader).handler({
+  const result = await createUpdateRecordsTool(tableService, undefined, undefined, reader).handler({
     tableName: 'sys_security_acl',
-    sysId: SYS_ID,
-    fields: { active: 'false' },
+    updates: [{ sysId: SYS_ID, fields: { active: 'false' } }],
     preflightAccess: true,
   });
 
@@ -401,9 +400,9 @@ test('without preflightAccess the write is sent exactly as before', async () => 
     },
   };
 
-  const result = await createCreateRecordTool(tableService, undefined, reader).handler({
+  const result = await createCreateRecordsTool(tableService, undefined, undefined, reader).handler({
     tableName: 'incident',
-    fields: { short_description: 'x' },
+    records: [{ short_description: 'x' }],
   });
 
   assert.equal(created, 1);

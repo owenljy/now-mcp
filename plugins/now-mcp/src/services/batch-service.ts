@@ -27,8 +27,18 @@ import {
 	type BatchSubResponse,
 	isBatchEndpointUnavailable,
 } from '../utils/native-batch.js';
+import { transactionScopeParam } from '../utils/transaction-scope.js';
 import { validateWriteAccess } from '../utils/validators.js';
+import {
+	fieldMismatches,
+	NOT_PERSISTED_MESSAGE,
+	VERIFICATION_EVIDENCE_FIELDS,
+} from '../utils/write-verification.js';
+import type { SchemaService } from './schema-service.js';
 import { TableService } from './table-service.js';
+
+/** Counterpart of NOT_PERSISTED_MESSAGE for a record that survived a delete. */
+const NOT_DELETED = 'Delete returned success, but the record still exists.';
 
 /** One entry of a batch result, before counting. */
 type ResultEntry = BatchOperationResult['results'][number];
@@ -48,9 +58,12 @@ export class BatchService {
 	private tableService: TableService;
 	private instanceManager: InstanceManager;
 
-	constructor(instanceManager: InstanceManager) {
+	constructor(
+		instanceManager: InstanceManager,
+		private schemaService?: SchemaService,
+	) {
 		this.instanceManager = instanceManager;
-		this.tableService = new TableService(instanceManager);
+		this.tableService = new TableService(instanceManager, schemaService);
 	}
 
 	/**
@@ -188,6 +201,10 @@ export class BatchService {
 			continueOnError,
 		});
 
+		// Resolved once for the whole call (same table for every record), not
+		// per-record — see transaction-scope.ts.
+		const scopeParam = await transactionScopeParam(this.schemaService, tableName, instance);
+
 		const native = await this.runWaves(
 			records,
 			resolved.name,
@@ -195,7 +212,7 @@ export class BatchService {
 				id: `c${index}`,
 				method: 'POST',
 				// Same reference-link stripping as the single-record create path.
-				url: `${API_ENDPOINTS.TABLE_RECORD(tableName)}?sysparm_exclude_reference_link=true`,
+				url: `${API_ENDPOINTS.TABLE_RECORD(tableName)}?sysparm_exclude_reference_link=true${scopeParam}`,
 				body: data,
 			}),
 			(_data, index, response) =>
@@ -232,6 +249,8 @@ export class BatchService {
 	 * @param updates Array of update objects with sysId and fields
 	 * @param updateType Type of update (partial or full)
 	 * @param continueOnError Whether to continue on individual failures
+	 * @param verify Whether to read every updated record back and confirm the
+	 *               requested values persisted (one extra batched request)
 	 * @param instance Optional instance name
 	 */
 	async batchUpdate(
@@ -239,6 +258,7 @@ export class BatchService {
 		updates: Array<{ sysId: string; fields: RecordData }>,
 		updateType: 'partial' | 'full' = 'partial',
 		continueOnError: boolean = true,
+		verify: boolean = false,
 		instance?: string,
 	): Promise<BatchOperationResult> {
 		validateWriteAccess(this.instanceManager, instance);
@@ -248,7 +268,12 @@ export class BatchService {
 			instance: resolved.name,
 			updateType,
 			continueOnError,
+			verify,
 		});
+
+		// Resolved once for the whole call (same table for every record), not
+		// per-record — see transaction-scope.ts.
+		const scopeParam = await transactionScopeParam(this.schemaService, tableName, instance);
 
 		const native = await this.runWaves(
 			updates,
@@ -256,7 +281,7 @@ export class BatchService {
 			(update, index) => ({
 				id: `u${index}`,
 				method: updateType === 'full' ? 'PUT' : 'PATCH',
-				url: `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, update.sysId)}?sysparm_exclude_reference_link=true`,
+				url: `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, update.sysId)}?sysparm_exclude_reference_link=true${scopeParam}`,
 				body: update.fields,
 			}),
 			(update, index, response) =>
@@ -265,6 +290,7 @@ export class BatchService {
 			instance,
 		);
 		if (native) {
+			if (verify) await this.verifyUpdatedInBatch(tableName, updates, native, instance);
 			logger.info(
 				`Batch update completed: ${native.successCount} succeeded, ${native.failureCount} failed`,
 				{ tableName, instance: resolved.name, transport: 'batch-api' },
@@ -283,6 +309,27 @@ export class BatchService {
 					updateType === 'full',
 					instance,
 				);
+				if (verify) {
+					const reread = await this.tableService.getRecord(
+						tableName,
+						update.sysId,
+						[...VERIFICATION_EVIDENCE_FIELDS, ...Object.keys(update.fields)],
+						instance,
+					);
+					const mismatches = fieldMismatches(update.fields, reread);
+					if (mismatches.length > 0) {
+						return {
+							index,
+							success: false,
+							sysId: update.sysId,
+							verified: false,
+							mismatches,
+							record: reread,
+							error: NOT_PERSISTED_MESSAGE,
+						};
+					}
+					return { index, success: true, sysId: update.sysId, verified: true };
+				}
 				return { index, success: true, sysId: record.sys_id };
 			},
 			(update, index, message) => ({
@@ -345,14 +392,91 @@ export class BatchService {
 			continueOnError,
 			async (sysId, index) => {
 				await this.tableService.deleteRecord(tableName, sysId, instance);
-				let verified: boolean | undefined;
 				if (verify) {
-					verified = await this.readBackConfirmsDeletion(tableName, sysId, instance);
+					const gone = await this.readBackConfirmsDeletion(tableName, sysId, instance);
+					// Same verdict as the batched path: a record that survived is a
+					// failure, not a success carrying verified:false.
+					if (!gone) {
+						return { index, success: false, sysId, verified: false, error: NOT_DELETED };
+					}
+					return { index, success: true, sysId, verified: true };
 				}
-				return { index, success: true, sysId, ...(verify ? { verified } : {}) };
+				return { index, success: true, sysId };
 			},
 			(sysId, index, message) => ({ index, success: false, sysId, error: message }),
 		);
+	}
+
+	/**
+	 * Read back every successfully-updated record in ONE extra batch request and
+	 * compare the requested values against what the row now holds.
+	 *
+	 * This is the check that makes verification affordable for any number of
+	 * records: the single-record path pays one extra round trip, and so does a
+	 * fifty-record batch. A row whose values did not persist is flipped to a
+	 * failure carrying the mismatching fields — ServiceNow answers a write refused
+	 * by an ACL or aborted by a business rule with 200 and an echoed row, so
+	 * reporting success for it is the one outcome the caller must never be handed.
+	 */
+	private async verifyUpdatedInBatch(
+		tableName: string,
+		updates: Array<{ sysId: string; fields: RecordData }>,
+		result: BatchOperationResult,
+		instance?: string,
+	): Promise<void> {
+		const updated = result.results.filter((r) => r?.success && r.sysId);
+		if (updated.length === 0) return;
+
+		const client = this.instanceManager.getClient(instance);
+		const requests: BatchSubRequest[] = updated.map((entry) => {
+			const fields = [...VERIFICATION_EVIDENCE_FIELDS, ...Object.keys(updates[entry.index].fields)];
+			return {
+				id: `v${entry.index}`,
+				method: 'GET',
+				url:
+					`${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, entry.sysId as string)}` +
+					`?sysparm_exclude_reference_link=true&sysparm_fields=${fields.join(',')}`,
+			};
+		});
+
+		let outcome: Awaited<ReturnType<typeof client.batch>>;
+		try {
+			outcome = await client.batch(requests);
+		} catch (error) {
+			// Verification is an assurance step, not the operation — a failed probe
+			// must not turn completed updates into reported failures.
+			logger.warn('Batch update verification could not run', {
+				tableName,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return;
+		}
+
+		for (const entry of updated) {
+			const response = outcome.responses.get(`v${entry.index}`);
+			const row = (response?.body as { result?: Record<string, unknown> } | undefined)?.result;
+			// An unreadable row is not evidence of a failed write (the caller may hold
+			// write but not read access), so it stays a success with no verdict.
+			if (!response || response.statusCode >= 400 || !row) {
+				logger.warn('Batch update verification returned no row', {
+					tableName,
+					sysId: entry.sysId,
+					statusCode: response?.statusCode,
+				});
+				continue;
+			}
+			const mismatches = fieldMismatches(updates[entry.index].fields, row);
+			entry.verified = mismatches.length === 0;
+			if (mismatches.length > 0) {
+				entry.success = false;
+				entry.mismatches = mismatches;
+				entry.record = row;
+				entry.error = NOT_PERSISTED_MESSAGE;
+				result.successCount--;
+				result.failureCount++;
+			}
+		}
+		result.success = result.failureCount === 0;
 	}
 
 	/**
@@ -436,6 +560,11 @@ export class BatchService {
 	/**
 	 * Fallback transport: the original one-request-per-record loop, run in
 	 * concurrency-bounded waves. Kept for instances without the batch endpoint.
+	 *
+	 * Counts are derived from each entry's own `success` flag rather than from
+	 * "attempt did not throw": a verification read-back that finds the write did
+	 * not persist returns a FAILURE entry without throwing, and counting it as a
+	 * success is exactly the silent failure this path is meant to surface.
 	 */
 	private async loopedWaves<T>(
 		items: T[],
@@ -455,8 +584,10 @@ export class BatchService {
 			const promises = wave.map(async (item, offset) => {
 				const index = i + offset;
 				try {
-					results[index] = await attempt(item, index);
-					successCount++;
+					const entry = await attempt(item, index);
+					results[index] = entry;
+					if (entry.success) successCount++;
+					else failureCount++;
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					results[index] = onFailure(item, index, message);

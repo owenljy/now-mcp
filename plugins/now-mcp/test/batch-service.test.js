@@ -4,6 +4,9 @@ import { BatchService, resetBatchEndpointCache } from '../build/services/batch-s
 
 const WAVE_SIZE = 25; // mirrors DEFAULT_BATCH_CONCURRENCY in config/batch-config.ts
 
+/** The sys_id a Table API sub-request URL targets. */
+const sysIdOfUrl = (url) => url.split('/').pop().split('?')[0];
+
 /**
  * Stub of the Table Batch API. `handle(request)` decides each sub-request's
  * outcome, mirroring the real endpoint's contract: the envelope itself succeeds
@@ -114,6 +117,51 @@ test('batchCreate sends one request per wave instead of one per record', async (
   assert.equal(client.state.subRequests, 60);
   assert.equal(client.state.calls, 3, 'three waves => three HTTP requests');
   assert.ok(client.state.waves.every((w) => w.length <= WAVE_SIZE));
+});
+
+test('batchCreate adds sysparm_transaction_scope to every sub-request URL for a scoped table', async () => {
+  resetBatchEndpointCache();
+  const client = makeBatchClient();
+  const sysId = 'a3'.repeat(16);
+  const schemaService = {
+    async resolveTableScope() {
+      return { scoped: true, scopeSysId: sysId, scopeName: 'x_snc_myapp' };
+    },
+  };
+  const svc = new BatchService(makeManager(client), schemaService);
+
+  const records = Array.from({ length: 3 }, (_, i) => ({ name: `r${i}` }));
+  await svc.batchCreate('x_snc_myapp_widget', records, true);
+
+  const urls = client.state.waves.flat().map((r) => r.url);
+  assert.ok(
+    urls.every((u) => u.endsWith(`&sysparm_transaction_scope=${sysId}`)),
+    'every sub-request must carry the resolved scope',
+  );
+});
+
+test('batchUpdate adds sysparm_transaction_scope to every sub-request URL for a scoped table', async () => {
+  resetBatchEndpointCache();
+  const client = makeBatchClient();
+  const sysId = 'a4'.repeat(16);
+  const schemaService = {
+    async resolveTableScope() {
+      return { scoped: true, scopeSysId: sysId, scopeName: 'x_snc_myapp' };
+    },
+  };
+  const svc = new BatchService(makeManager(client), schemaService);
+
+  const updates = Array.from({ length: 3 }, (_, i) => ({
+    sysId: `${i}`.repeat(32).slice(0, 32),
+    fields: { name: `u${i}` },
+  }));
+  await svc.batchUpdate('x_snc_myapp_widget', updates, 'partial', true, false);
+
+  const urls = client.state.waves.flat().map((r) => r.url);
+  assert.ok(
+    urls.every((u) => u.endsWith(`&sysparm_transaction_scope=${sysId}`)),
+    'every sub-request must carry the resolved scope',
+  );
 });
 
 test('batchCreate continueOnError: one failed sub-request does not abort the rest', async () => {
@@ -384,4 +432,109 @@ test('the fallback path verifies deletes with a read-after-delete', async () => 
 
   assert.equal(result.results[0].success, true);
   assert.equal(result.results[0].verified, true);
+});
+
+test('batchUpdate verification costs ONE extra request and stamps verified', async () => {
+  resetBatchEndpointCache();
+  const updates = Array.from({ length: 10 }, (_, i) => ({
+    sysId: String(i).padStart(32, '0'),
+    fields: { priority: '1' },
+  }));
+  const client = makeBatchClient({
+    handle: (request) => ({
+      statusCode: 200,
+      body: { result: { sys_id: sysIdOfUrl(request.url), priority: '1' } },
+    }),
+  });
+  const svc = new BatchService(makeManager(client));
+
+  const result = await svc.batchUpdate('incident', updates, 'partial', true, true);
+
+  assert.equal(result.successCount, 10);
+  assert.ok(result.results.every((r) => r.verified === true));
+  assert.equal(client.state.calls, 2, 'one update wave + one verification wave');
+  // The read-back asks only for the written fields plus the evidence columns.
+  const verifyWave = client.state.waves[1];
+  assert.match(verifyWave[0].url, /sysparm_fields=sys_id,sys_updated_on,sys_mod_count,priority/);
+});
+
+test('an update whose value did not persist is reported as a FAILURE with the mismatch', async () => {
+  // ServiceNow answers a write refused by an ACL or aborted by a business rule
+  // with 200 and an echoed row, so the read-back is the only real signal.
+  resetBatchEndpointCache();
+  const updates = [
+    { sysId: 'a'.repeat(32), fields: { priority: '1' } },
+    { sysId: 'b'.repeat(32), fields: { priority: '1' } },
+  ];
+  const client = makeBatchClient({
+    handle: (request) => {
+      const sysId = sysIdOfUrl(request.url);
+      if (request.method !== 'GET') return { statusCode: 200, body: { result: { sys_id: sysId } } };
+      // The second record silently kept its old value.
+      const stale = sysId === 'b'.repeat(32);
+      return { statusCode: 200, body: { result: { sys_id: sysId, priority: stale ? '3' : '1' } } };
+    },
+  });
+  const svc = new BatchService(makeManager(client));
+
+  const result = await svc.batchUpdate('incident', updates, 'partial', true, true);
+
+  assert.equal(result.results[0].success, true);
+  assert.equal(result.results[1].success, false);
+  assert.equal(result.results[1].verified, false);
+  assert.deepEqual(result.results[1].mismatches, [
+    { field: 'priority', expected: '1', actual: '3' },
+  ]);
+  assert.match(result.results[1].error, /did not persist/);
+  assert.equal(result.successCount, 1);
+  assert.equal(result.failureCount, 1);
+  assert.equal(result.success, false);
+});
+
+test('an unreadable row after an update stays a success with no verdict', async () => {
+  // Write access without read access is a real configuration; a 403 on the
+  // read-back is not evidence that the write failed.
+  resetBatchEndpointCache();
+  const client = makeBatchClient({
+    handle: (request) =>
+      request.method === 'GET'
+        ? { statusCode: 403, body: { error: { message: 'no read' } } }
+        : { statusCode: 200, body: { result: { sys_id: sysIdOfUrl(request.url) } } },
+  });
+  const svc = new BatchService(makeManager(client));
+
+  const result = await svc.batchUpdate(
+    'incident',
+    [{ sysId: 'a'.repeat(32), fields: { priority: '1' } }],
+    'partial',
+    true,
+    true
+  );
+
+  assert.equal(result.results[0].success, true);
+  assert.equal(result.results[0].verified, undefined);
+  assert.equal(result.successCount, 1);
+});
+
+test('the fallback path also demotes an update that did not persist', async () => {
+  resetBatchEndpointCache();
+  const client = makeLegacyClient({
+    getResult: () => ({ result: { sys_id: 'a'.repeat(32), priority: '3' } }),
+  });
+  const svc = new BatchService(makeManager(client));
+
+  const result = await svc.batchUpdate(
+    'incident',
+    [{ sysId: 'a'.repeat(32), fields: { priority: '1' } }],
+    'partial',
+    true,
+    true
+  );
+
+  // Counting comes off the entry's own success flag, so a verification failure
+  // that never threw is not counted as a success.
+  assert.equal(result.results[0].success, false);
+  assert.equal(result.successCount, 0);
+  assert.equal(result.failureCount, 1);
+  assert.equal(result.success, false);
 });

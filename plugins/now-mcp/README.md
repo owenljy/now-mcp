@@ -161,15 +161,22 @@ returns the full entry stream with timestamps and authors.
 |---|---|
 | `sn_query_records` | Read any table — encoded-query filters, field selection, **dot-walking**, pagination, display values, and `expand` for nested reference fields in one round trip; field names are checked before the query is sent; on MCP auth/transport failure, automatically tries an aligned `now-sdk query` profile |
 | `sn_aggregate_records` | Counts / group-by / avg / sum / min / max via the **Stats API** (server-side, cheap) |
-| `sn_create_record` | Insert a record (with schema field validation + typo hints, and write-routing guards) |
-| `sn_update_record` | Patch/replace a record by sys_id; verifies persistence by default and classifies silent non-persistence |
+| `sn_create_records` | Insert **one or many** records (with schema field validation + typo hints, and write-routing guards) |
+| `sn_update_records` | Patch/replace **one or many** records by sys_id; verifies persistence by default and classifies silent non-persistence |
 | `sn_delete_records` | Delete **one or many** records by sys_id (destructive); verifies deletion by default in a single extra request |
-| `sn_batch_create` / `sn_batch_update` | Create/update many records via the **Table Batch API** — one request per wave of 25 (default 50/call; not transactional) |
 | `sn_diff_records` | Compare two records on a table field-by-field; returns only what differs |
 
-`sn_delete_records` is one tool for both cardinalities — the underlying Table API
-call is identical whether you pass one sys_id or fifty, so cardinality is data
-rather than a different operation.
+One tool per operation, whatever the cardinality: the write tools take a list, and
+one record is a list of length one. Cardinality is data, not a different
+operation — and a separate batch tool has a second cost beyond the extra choice,
+because a caller looking at two tools tends to loop the single-record one and pay
+fifty round trips for work the batch endpoint does in two.
+
+Each write tool picks its own transport: one record goes over the plain Table API,
+where a refusal arrives as a real HTTP status and the response can echo the row;
+two or more go over the **Table Batch API** in waves of 25 (default max 50 per
+call, not transactional). All three return the same envelope — `summary` counts
+plus one `results[]` entry per record.
 
 #### Failures ServiceNow does not report
 
@@ -250,8 +257,8 @@ reported as read-only.
 
 Two consequences worth knowing:
 
-- `sn_create_record`, `sn_update_record`, `sn_batch_create` and `sn_batch_update`
-  accept `preflightAccess: true`, which asks for that verdict first and refuses
+- `sn_create_records` and `sn_update_records` accept `preflightAccess: true`,
+  which asks for that verdict first and refuses
   locally — with the verdict quoted — instead of discovering the denial as a 403
   (or as a 200 that persisted nothing). Off by default: it costs one round trip,
   and only an explicit `false` blocks. If the probe itself fails, the write
@@ -414,14 +421,26 @@ to pin the YAML's own `default` instead.
 
 - **Read-only by default.** Every instance is read-only unless you explicitly set
   `readOnly: false`. Write tools return a clear `AccessDeniedError` otherwise.
-- **Verified mutations.** `sn_update_record` and `sn_delete_records` reread state
+- **Verified mutations.** `sn_update_records` and `sn_delete_records` reread state
   by default and fail when the requested mutation did not persist. Pass
   `verify: false` only when the caller explicitly accepts weaker assurance.
   Verification failures return `failureType: "mutation_not_persisted"` and
-  recommend `sn_diagnose_mutation`. Delete verification is batched into a single
-  extra request regardless of how many records were deleted, so a record the API
-  claimed to delete but which still exists is reported as a **failure** rather
-  than a success with a flag on it.
+  recommend `sn_diagnose_mutation`. Verification is batched into a single extra
+  request regardless of how many records were written, so a record the API
+  reported success for but which did not persist (or still exists, for a delete)
+  is reported as a **failure** rather than a success with a flag on it.
+- **Scope-correct writes.** `sn_create_records` and `sn_update_records` resolve
+  the target table's owning application (`sys_db_object.sys_scope`) and, when it
+  isn't global, run the write with `sysparm_transaction_scope` set to that app —
+  otherwise a before-insert/update business rule that checks
+  `gs.getCurrentScopeName()` sees the integration user's own scope (usually
+  global) rather than the scoped app's, even though the row itself lands
+  correctly. Resolution is cached and best-effort: a failed lookup never blocks
+  the write, it just runs without the override, same as today.
+- **Confirmation where it earns its keep.** Every delete is confirmed through MCP
+  elicitation, and so is any update touching more than one record. A single
+  targeted field change is not prompted — prompting for ordinary work trains the
+  user to accept without reading.
 - **ACL-aware diagnosis.** `sn_diagnose_mutation` maps record update to the
   ServiceNow `write` ACL operation and inspects exact, inherited, field, and
   wildcard coverage. No visible effective ACL is reported as

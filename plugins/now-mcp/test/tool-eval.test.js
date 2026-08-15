@@ -21,8 +21,8 @@ const TOOL_MODULES = {
   sn_get_table_schema: ['../build/tools/get-table-schema-tool.js', 'GET_TABLE_SCHEMA_TOOL'],
   sn_list_tables: ['../build/tools/list-tables-tool.js', 'LIST_TABLES_TOOL'],
   sn_get_choice_list: ['../build/tools/get-choice-list-tool.js', 'GET_CHOICE_LIST_TOOL'],
-  sn_create_record: ['../build/tools/create-record-tool.js', 'CREATE_RECORD_TOOL'],
-  sn_update_record: ['../build/tools/update-record-tool.js', 'UPDATE_RECORD_TOOL'],
+  sn_create_records: ['../build/tools/create-records-tool.js', 'CREATE_RECORDS_TOOL'],
+  sn_update_records: ['../build/tools/update-records-tool.js', 'UPDATE_RECORDS_TOOL'],
 };
 
 async function loadDescriptor(spec) {

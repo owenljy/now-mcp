@@ -127,49 +127,63 @@ export const GetRecordSchema = z.object({
 
 export type GetRecordInput = z.infer<typeof GetRecordSchema>;
 
+/** A non-empty field-value map for one record. */
+const fieldsMap = (label: string) =>
+	z.record(z.unknown()).refine((data) => Object.keys(data).length > 0, {
+		message: `${label} must have at least one field`,
+	});
+
 /**
- * Schema for creating a new record
+ * Schema for creating one or many records.
+ *
+ * One schema (and one tool) covers both, for the reason spelled out on
+ * DeleteRecordsSchema below. Create has a second reason the delete split did
+ * not: facing a separate batch tool, a caller tends to loop the single-record
+ * one, paying fifty round trips for work the batch endpoint does in two. An
+ * array-shaped input makes batching the default rather than a decision.
  */
-export const CreateRecordSchema = z.object({
+export const CreateRecordsSchema = z.object({
 	instance: instanceField,
 	tableName: tableNameField(),
-	fields: z
-		.record(z.unknown())
-		.refine((data) => Object.keys(data).length > 0, {
-			message: 'At least one field must be provided',
-		})
-		.describe('Field-value pairs for the new record'),
+	records: z
+		.array(fieldsMap('Each record'))
+		.min(1, 'At least one record is required')
+		.superRefine(enforceBatchSize)
+		.describe('Field-value pairs per record to create — one record or many.'),
+	continueOnError: continueOnErrorField,
 	skipFieldValidation: skipFieldValidationField.default(false),
 	acknowledgeRoutingRisk: acknowledgeRoutingRiskField,
 	preflightAccess: preflightAccessField,
 });
 
-export type CreateRecordInput = z.infer<typeof CreateRecordSchema>;
+export type CreateRecordsInput = z.infer<typeof CreateRecordsSchema>;
 
 /**
- * Schema for updating an existing record
+ * Schema for updating one or many records by sys_id. See CreateRecordsSchema for
+ * why cardinality is data here rather than a separate tool.
  */
-export const UpdateRecordSchema = z.object({
+export const UpdateRecordsSchema = z.object({
 	instance: instanceField,
 	tableName: tableNameField(),
-	sysId: sysIdField(),
-	fields: z
-		.record(z.unknown())
-		.refine((data) => Object.keys(data).length > 0, {
-			message: 'At least one field must be provided',
-		})
-		.describe('Field-value pairs to update'),
+	updates: z
+		.array(z.object({ sysId: sysIdField(), fields: fieldsMap('Fields object') }))
+		.min(1, 'At least one update is required')
+		.superRefine(enforceBatchSize)
+		.describe('sysId + the fields to set, per record — one record or many.'),
 	updateType: updateTypeField,
+	continueOnError: continueOnErrorField,
 	skipFieldValidation: skipFieldValidationField.default(false),
 	preflightAccess: preflightAccessField,
 	verify: z
 		.boolean()
 		.optional()
 		.default(true)
-		.describe('Read the record back and verify requested values persisted (default true).'),
+		.describe(
+			'Read each record back and verify the requested values persisted (default true). Batched into one extra request, so the cost does not scale with the number of records.',
+		),
 });
 
-export type UpdateRecordInput = z.infer<typeof UpdateRecordSchema>;
+export type UpdateRecordsInput = z.infer<typeof UpdateRecordsSchema>;
 
 /**
  * Schema for deleting one or many records.

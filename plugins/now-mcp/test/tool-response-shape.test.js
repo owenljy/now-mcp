@@ -3,8 +3,7 @@ import { test } from 'node:test';
 
 import { toolResult } from '../build/utils/tool-response.js';
 
-import { createBatchCreateTool } from '../build/tools/batch-create-tool.js';
-import { createCreateRecordTool } from '../build/tools/create-record-tool.js';
+import { createCreateRecordsTool } from '../build/tools/create-records-tool.js';
 import { createGetTableSchemaTool } from '../build/tools/get-table-schema-tool.js';
 import { createQueryRecordsTool } from '../build/tools/query-records-tool.js';
 
@@ -86,7 +85,7 @@ test('get_table_schema compacts fields: name/type always, falsey booleans omitte
 	assert.equal(out.instanceUrl, 'https://dev.service-now.com');
 });
 
-test('create_record echoes sys_id + only the fields the caller set, not the whole row', async () => {
+test('a single-record create echoes sys_id + only the fields the caller set, not the whole row', async () => {
 	const created = {
 		sys_id: 'a'.repeat(32),
 		short_description: 'Net down',
@@ -95,12 +94,15 @@ test('create_record echoes sys_id + only the fields the caller set, not the whol
 		state: '1',
 		number: 'INC0001',
 	};
-	const tool = createCreateRecordTool(fakeTableServiceForCreate(created), undefined);
-	const res = await tool.handler({ tableName: 'incident', fields: { short_description: 'Net down' } });
+	const tool = createCreateRecordsTool(fakeTableServiceForCreate(created), undefined, undefined);
+	const res = await tool.handler({
+		tableName: 'incident',
+		records: [{ short_description: 'Net down' }],
+	});
 	const out = res.structuredContent;
 
-	assert.equal(out.sys_id, 'a'.repeat(32));
-	assert.deepEqual(Object.keys(out.record).sort(), ['short_description', 'sys_id']);
+	assert.equal(out.results[0].sysId, 'a'.repeat(32));
+	assert.deepEqual(Object.keys(out.results[0].record).sort(), ['short_description', 'sys_id']);
 	assert.ok(!('message' in out), 'prose message field dropped');
 });
 
@@ -123,7 +125,7 @@ test('query_records summary is thin and rows stay in structuredContent', async (
 	assert.equal(res._meta.transport, 'table-api');
 });
 
-test('batch_create response drops successRate and prose message', async () => {
+test('a multi-record create response drops successRate and prose message', async () => {
 	const batchService = {
 		async batchCreate() {
 			return {
@@ -135,7 +137,7 @@ test('batch_create response drops successRate and prose message', async () => {
 		},
 	};
 	// no schemaService => pre-flight validation is skipped
-	const tool = createBatchCreateTool(batchService, undefined);
+	const tool = createCreateRecordsTool(undefined, batchService, undefined);
 	const res = await tool.handler({
 		tableName: 'incident',
 		records: [{ short_description: '1' }, { short_description: '2' }],

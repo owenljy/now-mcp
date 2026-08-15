@@ -4,17 +4,19 @@
  * Replaces the former sn_delete_record / sn_batch_delete pair. The split forced
  * the caller to choose a tool by cardinality, which carries no meaning: the
  * underlying Table API call is the same, and "how many records" is data, not a
- * different operation. One record is an array of length one.
+ * different operation. One record is an array of length one. sn_create_records
+ * and sn_update_records followed for the same reason.
  */
 
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { DeleteRecordsOutputSchema } from '../schemas/output-schemas.js';
+import { WriteRecordsOutputSchema } from '../schemas/output-schemas.js';
 import { DeleteRecordsSchema } from '../schemas/table-schemas.js';
 import type { BatchService } from '../services/batch-service.js';
 import { elicitConfirmation, toolAborted } from '../utils/elicitation.js';
 import { toolError } from '../utils/error-handler.js';
+import { renderHints, resultsFailureHints } from '../utils/failure-enrichment.js';
 import { logger } from '../utils/logger.js';
-import { toolResult } from '../utils/tool-response.js';
+import { writeResult } from '../utils/tool-response.js';
 
 export const DELETE_RECORDS_TOOL = {
 	name: 'sn_delete_records',
@@ -28,7 +30,7 @@ WARNING: permanent hard delete. There is no trash/undo — recovery is only poss
 
 verify (default true) reads each record back to confirm it is gone, batched into one extra request — so a record the API claimed to delete but which still exists is reported as a failure, not a success.`,
 	inputSchema: DeleteRecordsSchema,
-	outputSchema: DeleteRecordsOutputSchema,
+	outputSchema: WriteRecordsOutputSchema,
 };
 
 export function createDeleteRecordsTool(batchService: BatchService) {
@@ -78,9 +80,20 @@ export function createDeleteRecordsTool(batchService: BatchService) {
 					warning: 'Deleted records are permanently gone',
 				};
 
-				return toolResult(
+				// Per-record failures never throw, so the recovery guidance a thrown
+				// error would have carried is attached from the first one.
+				const hints = renderHints(
+					resultsFailureHints(result.results, {
+						table: validated.tableName,
+						operation: 'delete',
+						requiredRoles: ['admin', 'itil'],
+					}),
+				);
+
+				return writeResult(
 					response,
 					`delete ${validated.tableName}: ${result.successCount} ok, ${result.failureCount} failed`,
+					{ extraText: hints ? [hints] : [] },
 				);
 			} catch (error) {
 				logger.error('Error deleting records', error);

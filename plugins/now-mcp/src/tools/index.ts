@@ -25,10 +25,8 @@ import { isNowSdkAvailable } from '../utils/now-sdk-cli.js';
 import { formatToolCall } from '../utils/tool-log.js';
 import { createAggregateRecordsTool } from './aggregate-records-tool.js';
 import { TOOL_ANNOTATIONS } from './annotations.js';
-import { createBatchCreateTool } from './batch-create-tool.js';
-import { createBatchUpdateTool } from './batch-update-tool.js';
 import { createConnectionStatusTool, createResetConnectionTool } from './connection-status-tool.js';
-import { createCreateRecordTool } from './create-record-tool.js';
+import { createCreateRecordsTool } from './create-records-tool.js';
 import { createDeleteRecordsTool } from './delete-records-tool.js';
 import { createDiagnoseMutationTool } from './diagnose-mutation-tool.js';
 import { createDiffRecordsTool } from './diff-records-tool.js';
@@ -44,7 +42,7 @@ import { createListTablesTool } from './list-tables-tool.js';
 import { createQueryRecordsTool } from './query-records-tool.js';
 import { createSdkStatusTool } from './sdk-status-tool.js';
 import { createSwitchDefaultInstanceTool } from './switch-default-instance-tool.js';
-import { createUpdateRecordTool } from './update-record-tool.js';
+import { createUpdateRecordsTool } from './update-records-tool.js';
 import { createUploadAttachmentTool } from './upload-attachment-tool.js';
 
 /**
@@ -145,12 +143,14 @@ export async function registerTools(
 	server: McpServer,
 	instanceManager: InstanceManager,
 ): Promise<void> {
-	// Initialize services with instance manager
-	const tableService = new TableService(instanceManager);
+	// Initialize services with instance manager. schemaService is constructed
+	// first so table/batch writes can resolve a scoped table's owning app scope
+	// (sysparm_transaction_scope) — see utils/transaction-scope.ts.
+	const schemaService = new SchemaService(instanceManager);
+	const tableService = new TableService(instanceManager, schemaService);
 	const attachmentService = new AttachmentService(instanceManager);
 	const scriptService = new ScriptService(instanceManager);
-	const batchService = new BatchService(instanceManager);
-	const schemaService = new SchemaService(instanceManager);
+	const batchService = new BatchService(instanceManager, schemaService);
 	// Read-only GraphQL transport: `expand` on sn_query_records, plus the
 	// effective-ACL verdicts the security and write tools ask for. Not a tool of
 	// its own — see services/graphql-service.ts for why raw GraphQL is
@@ -161,16 +161,13 @@ export async function registerTools(
 		// Table operations (runtime data)
 		createQueryRecordsTool(tableService, schemaService, graphqlService),
 		createAggregateRecordsTool(tableService, schemaService),
-		createCreateRecordTool(tableService, schemaService, graphqlService),
-		createUpdateRecordTool(tableService, schemaService, graphqlService),
-		// One tool for one record or many: cardinality is data, not a different
-		// operation. Deletes route through BatchService so a single delete and a
-		// fifty-record delete share the same verification path.
+		// One tool per operation, for one record or many: cardinality is data, not a
+		// different operation, and a separate batch tool got looped per record. Each
+		// write tool routes internally — the plain Table API for a single record (real
+		// HTTP status, echoed row), the Table Batch API in waves beyond that.
+		createCreateRecordsTool(tableService, batchService, schemaService, graphqlService),
+		createUpdateRecordsTool(tableService, batchService, schemaService, graphqlService),
 		createDeleteRecordsTool(batchService),
-
-		// Batch operations
-		createBatchCreateTool(batchService, schemaService, graphqlService),
-		createBatchUpdateTool(batchService, schemaService, graphqlService),
 
 		// Schema discovery
 		createGetTableSchemaTool(schemaService),

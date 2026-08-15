@@ -89,10 +89,8 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
 	sn_reset_connection: LOCAL_MUTATION,
 
 	// Writes (create new state)
-	sn_create_record: WRITE,
-	sn_update_record: WRITE,
-	sn_batch_create: WRITE,
-	sn_batch_update: WRITE,
+	sn_create_records: WRITE,
+	sn_update_records: WRITE,
 	sn_upload_attachment: WRITE,
 
 	// Destructive / arbitrary code

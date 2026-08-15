@@ -9,8 +9,11 @@ import {
   DEFAULT_BATCH_DELAY_MS,
   MAX_BATCH_SIZE_CEILING,
 } from '../build/config/batch-config.js';
-import { BatchCreateSchema, BatchUpdateSchema } from '../build/schemas/batch-schemas.js';
-import { DeleteRecordsSchema } from '../build/schemas/table-schemas.js';
+import {
+  CreateRecordsSchema,
+  DeleteRecordsSchema,
+  UpdateRecordsSchema,
+} from '../build/schemas/table-schemas.js';
 
 const SYS_ID = 'a'.repeat(32);
 
@@ -83,33 +86,33 @@ const makeRecords = (n) => Array.from({ length: n }, (_, i) => ({ short_descript
 const makeUpdates = (n) => Array.from({ length: n }, () => ({ sysId: SYS_ID, fields: { priority: '1' } }));
 const makeSysIds = (n) => Array.from({ length: n }, () => SYS_ID);
 
-test('BatchCreateSchema enforces the configured cap at parse time', () => {
+test('CreateRecordsSchema enforces the configured cap at parse time', () => {
   withEnv('SERVICENOW_MAX_BATCH_SIZE', undefined, () => {
     // At the default cap: 50 ok, 51 rejected.
-    assert.doesNotThrow(() => BatchCreateSchema.parse({ tableName: 'incident', records: makeRecords(50) }));
+    assert.doesNotThrow(() => CreateRecordsSchema.parse({ tableName: 'incident', records: makeRecords(50) }));
     assert.throws(
-      () => BatchCreateSchema.parse({ tableName: 'incident', records: makeRecords(51) }),
+      () => CreateRecordsSchema.parse({ tableName: 'incident', records: makeRecords(51) }),
       /more than 50 records/,
     );
   });
 });
 
-test('BatchCreateSchema cap follows the env override', () => {
+test('CreateRecordsSchema cap follows the env override', () => {
   withEnv('SERVICENOW_MAX_BATCH_SIZE', '80', () => {
     // 51 now passes, 81 rejected with the raised limit in the message.
-    assert.doesNotThrow(() => BatchCreateSchema.parse({ tableName: 'incident', records: makeRecords(51) }));
+    assert.doesNotThrow(() => CreateRecordsSchema.parse({ tableName: 'incident', records: makeRecords(51) }));
     assert.throws(
-      () => BatchCreateSchema.parse({ tableName: 'incident', records: makeRecords(81) }),
+      () => CreateRecordsSchema.parse({ tableName: 'incident', records: makeRecords(81) }),
       /more than 80 records/,
     );
   });
 });
 
-test('BatchUpdateSchema enforces the configured cap at parse time', () => {
+test('UpdateRecordsSchema enforces the configured cap at parse time', () => {
   withEnv('SERVICENOW_MAX_BATCH_SIZE', undefined, () => {
-    assert.doesNotThrow(() => BatchUpdateSchema.parse({ tableName: 'incident', updates: makeUpdates(50) }));
+    assert.doesNotThrow(() => UpdateRecordsSchema.parse({ tableName: 'incident', updates: makeUpdates(50) }));
     assert.throws(
-      () => BatchUpdateSchema.parse({ tableName: 'incident', updates: makeUpdates(51) }),
+      () => UpdateRecordsSchema.parse({ tableName: 'incident', updates: makeUpdates(51) }),
       /more than 50 records/,
     );
   });

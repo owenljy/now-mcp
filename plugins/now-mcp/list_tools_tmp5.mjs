@@ -20,7 +20,7 @@ const { tools } = await client.listTools();
 
 const t = tools.find(x => x.name === 'sn_diff_records');
 console.log(JSON.stringify(t.inputSchema, null, 2));
-const t2 = tools.find(x => x.name === 'sn_batch_create');
+const t2 = tools.find(x => x.name === 'sn_create_records');
 console.log('=== batch create ===');
 console.log(JSON.stringify(t2.inputSchema, null, 2));
 

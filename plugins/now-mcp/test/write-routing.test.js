@@ -23,8 +23,7 @@ function makeAncestry(ci, { unresolvable = false } = {}) {
 
 const CI_CLASSES = ['cmdb_ci_server', 'cmdb_ci_linux_server'];
 const ancestry = makeAncestry(CI_CLASSES);
-import { createCreateRecordTool } from '../build/tools/create-record-tool.js';
-import { createBatchCreateTool } from '../build/tools/batch-create-tool.js';
+import { createCreateRecordsTool } from '../build/tools/create-records-tool.js';
 
 test('every CI class routes through the identification engine', async () => {
   for (const table of ['cmdb_ci', 'cmdb_ci_server', 'cmdb_ci_linux_server', 'cmdb_rel_ci']) {
@@ -86,7 +85,7 @@ test('the block message names the consequence and the replacement call', async (
   assert.match(message, /201/);
 });
 
-test('sn_create_record blocks a CI insert before any HTTP call', async () => {
+test('sn_create_records blocks a CI insert before any HTTP call', async () => {
   let called = false;
   const tableService = {
     async createRecord() {
@@ -94,9 +93,9 @@ test('sn_create_record blocks a CI insert before any HTTP call', async () => {
       return { sys_id: 'a'.repeat(32) };
     },
   };
-  const res = await createCreateRecordTool(tableService, ancestry).handler({
+  const res = await createCreateRecordsTool(tableService, undefined, ancestry).handler({
     tableName: 'cmdb_ci_server',
-    fields: { name: 'web01' },
+    records: [{ name: 'web01' }],
   });
 
   assert.equal(res.isError, true);
@@ -104,7 +103,7 @@ test('sn_create_record blocks a CI insert before any HTTP call', async () => {
   assert.match(res.content[0].text, /identifyreconcile/);
 });
 
-test('sn_create_record proceeds once the risk is acknowledged', async () => {
+test('sn_create_records proceeds once the risk is acknowledged', async () => {
   let called = false;
   const tableService = {
     async createRecord() {
@@ -112,9 +111,9 @@ test('sn_create_record proceeds once the risk is acknowledged', async () => {
       return { sys_id: 'a'.repeat(32), name: 'web01' };
     },
   };
-  const res = await createCreateRecordTool(tableService, ancestry).handler({
+  const res = await createCreateRecordsTool(tableService, undefined, ancestry).handler({
     tableName: 'cmdb_ci_server',
-    fields: { name: 'web01' },
+    records: [{ name: 'web01' }],
     acknowledgeRoutingRisk: true,
   });
 
@@ -122,7 +121,7 @@ test('sn_create_record proceeds once the risk is acknowledged', async () => {
   assert.equal(called, true);
 });
 
-test('sn_batch_create blocks a routed table too', async () => {
+test('a multi-record insert is blocked on a routed table too', async () => {
   let called = false;
   const batchService = {
     async batchCreate() {
@@ -130,9 +129,9 @@ test('sn_batch_create blocks a routed table too', async () => {
       return { success: true, successCount: 1, failureCount: 0, results: [] };
     },
   };
-  const res = await createBatchCreateTool(batchService, ancestry).handler({
+  const res = await createCreateRecordsTool(undefined, batchService, ancestry).handler({
     tableName: 'sc_req_item',
-    records: [{ cat_item: 'x' }],
+    records: [{ cat_item: 'x' }, { cat_item: 'y' }],
   });
 
   assert.equal(res.isError, true);
@@ -143,7 +142,7 @@ test('sn_batch_create blocks a routed table too', async () => {
 test('updates and deletes are unaffected — only inserts are routed', async () => {
   // Correcting an existing CI or closing an existing request item is ordinary
   // data maintenance; blocking it would break legitimate work.
-  const { createUpdateRecordTool } = await import('../build/tools/update-record-tool.js');
+  const { createUpdateRecordsTool } = await import('../build/tools/update-records-tool.js');
   let called = false;
   const tableService = {
     async updateRecord() {
@@ -154,10 +153,9 @@ test('updates and deletes are unaffected — only inserts are routed', async () 
       return { sys_id: 'a'.repeat(32), name: 'web01' };
     },
   };
-  const res = await createUpdateRecordTool(tableService, ancestry).handler({
+  const res = await createUpdateRecordsTool(tableService, undefined, ancestry).handler({
     tableName: 'cmdb_ci_server',
-    sysId: 'a'.repeat(32),
-    fields: { name: 'web01' },
+    updates: [{ sysId: 'a'.repeat(32), fields: { name: 'web01' } }],
     verify: false,
   });
 

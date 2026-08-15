@@ -20,8 +20,8 @@ const SERVER_ENV = {
 const EXPECTED_CORE_TOOLS = [
   'sn_query_records',
   'sn_aggregate_records',
-  'sn_create_record',
-  'sn_update_record',
+  'sn_create_records',
+  'sn_update_records',
   'sn_delete_records',
   'sn_get_table_schema',
   'sn_list_tables',

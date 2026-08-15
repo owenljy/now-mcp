@@ -54,3 +54,24 @@ export function toolResult(
 		? { content, structuredContent, _meta: opts.meta }
 		: { content, structuredContent };
 }
+
+/**
+ * Result builder for the write tools (create / update / delete), which all
+ * return per-record outcomes for one record or fifty.
+ *
+ * The only addition over `toolResult` is the error signal: a call where NOTHING
+ * succeeded is `isError`, because the caller asked for writes and got none — the
+ * same signal a single-record failure has always produced. A partial success is
+ * not an error; its counts and `results[]` describe exactly what landed, and
+ * flagging it would misreport the records that did persist.
+ */
+export function writeResult(
+	structuredContent: Record<string, unknown> & {
+		summary: { total: number; successCount: number; failureCount: number };
+	},
+	summary: string,
+	opts?: { extraText?: string[] },
+): StructuredToolResult & { isError?: true } {
+	const base = toolResult(structuredContent, summary, opts);
+	return structuredContent.summary.successCount === 0 ? { ...base, isError: true } : base;
+}

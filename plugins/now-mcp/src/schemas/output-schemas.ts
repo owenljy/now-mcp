@@ -70,66 +70,35 @@ export const AggregateRecordsOutputSchema = z.object({
 	fetchedGroups: z.number().optional(),
 });
 
-/** sn_create_record — lean echo: sys_id + the fields the caller set. */
-export const CreateRecordOutputSchema = z.object({
+/**
+ * One envelope for every write tool — sn_create_records, sn_update_records,
+ * sn_delete_records — so the caller reads the same shape whether it wrote one
+ * record or fifty, and whichever transport served the call.
+ *
+ * `results` holds one entry per requested record: `index`, `success`, `sysId`,
+ * and — on a single-record write — the lean `record` echo (sys_id plus the fields
+ * the caller set). `verified` / `mismatches` appear when a read-after-write check
+ * ran: a record the API reported success for but which did not persist is
+ * reported as a FAILURE carrying the fields that disagreed, never as a success
+ * with a flag on it.
+ */
+export const WriteRecordsOutputSchema = z.object({
 	success: z.boolean(),
 	table: z.string(),
-	sys_id: z.string().optional(),
-	record: OpenRecord,
-});
-
-/** sn_update_record — lean echo: sys_id + the fields the caller changed. */
-export const UpdateRecordOutputSchema = z.object({
-	success: z.boolean(),
-	table: z.string(),
-	sys_id: z.string().optional(),
+	instance: z.string(),
 	updateType: z.string().optional(),
-	record: OpenRecord,
+	summary: z.object({
+		total: z.number(),
+		successCount: z.number(),
+		failureCount: z.number(),
+	}),
+	results: z.array(OpenRecord),
+	// Present when verification found a write that reported success but did not
+	// persist — a silent-failure diagnosis, not a transport error.
 	failureType: z.string().optional(),
 	likelyCauses: z.array(z.string()).optional(),
 	recommendedTool: z.string().optional(),
-	verification: z
-		.object({
-			performed: z.boolean(),
-			persisted: z.boolean().optional(),
-			mismatches: z.array(OpenRecord).optional(),
-		})
-		.optional(),
-});
-
-/**
- * sn_delete_records — one envelope for one or many records, so the caller reads
- * the same shape regardless of how many sys_ids were passed.
- *
- * Each entry in `results` carries `verified` when verify was on: false means the
- * delete reported success but the record read back, in which case the entry is
- * also marked unsuccessful.
- */
-export const DeleteRecordsOutputSchema = z.object({
-	success: z.boolean(),
-	table: z.string(),
-	instance: z.string(),
-	summary: z.object({
-		total: z.number(),
-		successCount: z.number(),
-		failureCount: z.number(),
-	}),
-	results: z.array(OpenRecord),
 	warning: z.string().optional(),
-});
-
-/** Shared batch result envelope (create + update + delete). */
-export const BatchOutputSchema = z.object({
-	success: z.boolean(),
-	table: z.string(),
-	instance: z.string(),
-	updateType: z.string().optional(),
-	summary: z.object({
-		total: z.number(),
-		successCount: z.number(),
-		failureCount: z.number(),
-	}),
-	results: z.array(OpenRecord),
 });
 
 // ServiceNow reference fields can arrive as a plain string or as a

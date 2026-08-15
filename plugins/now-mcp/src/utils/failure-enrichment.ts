@@ -154,6 +154,23 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 }
 
 /**
+ * Hints for a write whose per-record `results` contain failures.
+ *
+ * A multi-record write reports failures inside `results[]` instead of throwing,
+ * so the recovery guidance a single-record failure gets (via `toolError`) would
+ * otherwise be missing precisely when many records are involved. Derived from
+ * the FIRST failure: fifty rows refused by one ACL have one cause, and repeating
+ * the same hint per row would only cost context.
+ */
+export function resultsFailureHints(
+	results: Array<{ success: boolean; error?: string } | undefined>,
+	ctx: FailureContext = {},
+): string[] {
+	const first = results.find((r) => r && !r.success && r.error);
+	return first?.error ? failureHints(first.error, ctx) : [];
+}
+
+/**
  * Hints for a successful-but-empty result set.
  */
 export function zeroResultHints(ctx: FailureContext = {}): string[] {

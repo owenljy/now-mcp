@@ -5,7 +5,7 @@ import { createDeleteRecordsTool } from '../build/tools/delete-records-tool.js';
 import { createDiagnoseMutationTool } from '../build/tools/diagnose-mutation-tool.js';
 import { EXECUTE_BACKGROUND_SCRIPT_TOOL, createExecuteBackgroundScriptTool } from '../build/tools/execute-background-script-tool.js';
 import { DELETE_RECORDS_TOOL } from '../build/tools/delete-records-tool.js';
-import { createUpdateRecordTool } from '../build/tools/update-record-tool.js';
+import { createUpdateRecordsTool } from '../build/tools/update-records-tool.js';
 
 test('tool descriptions route ordinary deletion to the dedicated delete tool first', () => {
 	assert.match(DELETE_RECORDS_TOOL.description, /FIRST and preferred tool/i);
@@ -47,18 +47,105 @@ test('security metadata writes require the explicit break-glass flag even withou
 	assert.equal(called, false);
 });
 
-test('update verification fails when persisted value differs', async () => {
+test('single-record update verification fails when the persisted value differs', async () => {
 	const service = {
 		async updateRecord() { return { sys_id: 'a'.repeat(32), active: 'true' }; },
 		async getRecord() { return { sys_id: 'a'.repeat(32), active: 'false' }; },
 	};
-	const res = await createUpdateRecordTool(service).handler({
-		tableName: 'incident', sysId: 'a'.repeat(32), fields: { active: true }, verify: true,
+	const res = await createUpdateRecordsTool(service).handler({
+		tableName: 'incident',
+		updates: [{ sysId: 'a'.repeat(32), fields: { active: true } }],
+		verify: true,
 	});
+	// Nothing succeeded, so the whole call is an error — same signal the split
+	// single-record tool gave.
 	assert.equal(res.isError, true);
-	assert.equal(res.structuredContent.verification.persisted, false);
+	assert.equal(res.structuredContent.success, false);
+	assert.equal(res.structuredContent.results[0].verified, false);
+	assert.deepEqual(res.structuredContent.results[0].mismatches, [
+		{ field: 'active', expected: true, actual: 'false' },
+	]);
 	assert.equal(res.structuredContent.failureType, 'mutation_not_persisted');
 	assert.equal(res.structuredContent.recommendedTool, 'sn_diagnose_mutation');
+});
+
+test('a single-record update is not gated behind a confirmation prompt', async () => {
+	let elicited = 0;
+	const server = {
+		async elicitInput() {
+			elicited++;
+			return { action: 'accept', content: { confirmed: true } };
+		},
+	};
+	const service = {
+		async updateRecord() { return { sys_id: 'a'.repeat(32), active: 'true' }; },
+	};
+	const res = await createUpdateRecordsTool(service).handler(
+		{ tableName: 'incident', updates: [{ sysId: 'a'.repeat(32), fields: { active: true } }], verify: false },
+		server,
+	);
+	assert.equal(elicited, 0, 'one targeted field change must not prompt');
+	assert.equal(res.structuredContent.success, true);
+});
+
+test('a multi-record update requires confirmation and writes nothing when declined', async () => {
+	let updated = 0;
+	const batchService = {
+		async batchUpdate() {
+			updated++;
+			return { success: true, successCount: 2, failureCount: 0, results: [] };
+		},
+	};
+	const server = { async elicitInput() { return { action: 'decline' }; } };
+	const res = await createUpdateRecordsTool(undefined, batchService).handler(
+		{
+			tableName: 'incident',
+			updates: [
+				{ sysId: 'a'.repeat(32), fields: { active: true } },
+				{ sysId: 'b'.repeat(32), fields: { active: true } },
+			],
+		},
+		server,
+	);
+	assert.equal(updated, 0, 'a declined confirmation must not reach the instance');
+	assert.match(res.content[0].text, /cancelled by user/);
+});
+
+test('a multi-record update surfaces a non-persisted row as a failure with the diagnosis', async () => {
+	// The read-back itself is BatchService's job (see batch-service.test.js); here
+	// we assert the tool reports the diagnosis and does not launder the failure.
+	const batchService = {
+		async batchUpdate() {
+			return {
+				success: false,
+				successCount: 1,
+				failureCount: 1,
+				results: [
+					{ index: 0, success: true, sysId: 'a'.repeat(32), verified: true },
+					{
+						index: 1,
+						success: false,
+						sysId: 'b'.repeat(32),
+						verified: false,
+						mismatches: [{ field: 'active', expected: true, actual: 'false' }],
+						error: 'Update returned success, but the requested values did not persist.',
+					},
+				],
+			};
+		},
+	};
+	const res = await createUpdateRecordsTool(undefined, batchService).handler({
+		tableName: 'incident',
+		updates: [
+			{ sysId: 'a'.repeat(32), fields: { active: true } },
+			{ sysId: 'b'.repeat(32), fields: { active: true } },
+		],
+	});
+	assert.equal(res.structuredContent.success, false);
+	assert.equal(res.structuredContent.summary.failureCount, 1);
+	assert.equal(res.structuredContent.failureType, 'mutation_not_persisted');
+	// A partial success is NOT an error result — one row did persist.
+	assert.equal(res.isError, undefined);
 });
 
 test('delete surfaces a record that survived verification as a failure', async () => {

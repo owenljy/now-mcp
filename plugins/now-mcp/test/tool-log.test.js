@@ -20,7 +20,7 @@ test('formatToolCall summarizes a successful call', () => {
 
 test('formatToolCall includes the instance when present', () => {
   const { msg, data } = formatToolCall({
-    tool: 'sn_create_record',
+    tool: 'sn_create_records',
     durationMs: 10,
     ok: true,
     instance: 'prod',
@@ -31,12 +31,12 @@ test('formatToolCall includes the instance when present', () => {
 
 test('formatToolCall summarizes an error call with the message', () => {
   const { msg, data } = formatToolCall({
-    tool: 'sn_update_record',
+    tool: 'sn_update_records',
     durationMs: 7,
     ok: false,
     error: 'boom',
   });
-  assert.match(msg, /sn_update_record/);
+  assert.match(msg, /sn_update_records/);
   assert.match(msg, /error/);
   assert.match(msg, /boom/);
   assert.equal(data.ok, false);
