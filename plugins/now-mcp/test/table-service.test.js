@@ -187,6 +187,67 @@ test('createRecord POSTs to the table endpoint and returns the result', async ()
   assert.deepEqual(call.body, { short_description: 'x' });
 });
 
+test('createRecord adds sysparm_transaction_scope when the table belongs to a scoped app', async () => {
+  const created = { sys_id: 'b'.repeat(32) };
+  const client = makeStubClient({ post: { result: created } });
+  const sysId = 'a1'.repeat(16);
+  const schemaService = {
+    async resolveTableScope() {
+      return { scoped: true, scopeSysId: sysId, scopeName: 'x_snc_myapp' };
+    },
+  };
+  const svc = new TableService(makeManager(client), schemaService);
+
+  await svc.createRecord('x_snc_myapp_widget', { name: 'x' });
+  assert.equal(
+    client.calls[0].endpoint,
+    `/api/now/table/x_snc_myapp_widget?sysparm_exclude_reference_link=true&sysparm_transaction_scope=${sysId}`,
+  );
+});
+
+test('createRecord omits sysparm_transaction_scope for a global table even with a SchemaService wired', async () => {
+  const created = { sys_id: 'b'.repeat(32) };
+  const client = makeStubClient({ post: { result: created } });
+  const schemaService = { async resolveTableScope() { return { scoped: false }; } };
+  const svc = new TableService(makeManager(client), schemaService);
+
+  await svc.createRecord('incident', { short_description: 'x' });
+  assert.equal(client.calls[0].endpoint, '/api/now/table/incident?sysparm_exclude_reference_link=true');
+});
+
+test('createRecord still writes, without sysparm_transaction_scope, when scope resolution fails', async () => {
+  const created = { sys_id: 'b'.repeat(32) };
+  const client = makeStubClient({ post: { result: created } });
+  const schemaService = {
+    async resolveTableScope() {
+      throw new Error('no read access to sys_db_object');
+    },
+  };
+  const svc = new TableService(makeManager(client), schemaService);
+
+  const rec = await svc.createRecord('incident', { short_description: 'x' });
+  assert.deepEqual(rec, created);
+  assert.equal(client.calls[0].endpoint, '/api/now/table/incident?sysparm_exclude_reference_link=true');
+});
+
+test('updateRecord adds sysparm_transaction_scope when the table belongs to a scoped app', async () => {
+  const updated = { sys_id: 'c'.repeat(32) };
+  const client = makeStubClient({ patch: { result: updated } });
+  const sysId = 'b2'.repeat(16);
+  const schemaService = {
+    async resolveTableScope() {
+      return { scoped: true, scopeSysId: sysId, scopeName: 'x_snc_myapp' };
+    },
+  };
+  const svc = new TableService(makeManager(client), schemaService);
+
+  await svc.updateRecord('x_snc_myapp_widget', 'c'.repeat(32), { name: 'y' });
+  assert.equal(
+    client.calls[0].endpoint,
+    `/api/now/table/x_snc_myapp_widget/${'c'.repeat(32)}?sysparm_exclude_reference_link=true&sysparm_transaction_scope=${sysId}`,
+  );
+});
+
 test('updateRecord uses PATCH for partial and PUT for full updates', async () => {
   const updated = { sys_id: 'c'.repeat(32) };
   const client = makeStubClient({ patch: { result: updated }, put: { result: updated } });

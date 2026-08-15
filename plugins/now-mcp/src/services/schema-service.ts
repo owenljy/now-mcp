@@ -7,7 +7,12 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { InstanceManager } from '../client/instance-manager.js';
-import type { FieldMetadata, TableListItem, TableMetadata } from '../schemas/schema-schemas.js';
+import type {
+	FieldMetadata,
+	TableListItem,
+	TableMetadata,
+	TableScopeInfo,
+} from '../schemas/schema-schemas.js';
 import { type FieldValidationResult, validateFieldNames } from '../utils/field-validation.js';
 import { closestMatch } from '../utils/levenshtein.js';
 import { logger } from '../utils/logger.js';
@@ -265,6 +270,59 @@ export class SchemaService {
 				error: error instanceof Error ? error.message : String(error),
 			});
 			return null;
+		}
+	}
+
+	/**
+	 * Resolve the application scope that owns a table (sys_db_object.sys_scope),
+	 * so a write to it can run in that scope's transaction context instead of
+	 * the caller's own session scope — without this, a before-insert/update
+	 * business rule that checks gs.getCurrentScopeName() sees the integration
+	 * user's scope (typically global), not the target app's, even though the
+	 * record itself lands in the scoped table.
+	 *
+	 * Global tables — the overwhelming majority — resolve to `scoped: false` so
+	 * callers can skip sysparm_transaction_scope entirely, leaving today's
+	 * behavior unchanged for every out-of-box table.
+	 *
+	 * Best-effort: any failure (no read access to sys_db_object, network error)
+	 * resolves to `scoped: false` rather than blocking the write that asked for
+	 * it — same posture as checkWebServiceAccess/suggestTableName above.
+	 */
+	async resolveTableScope(tableName: string, instance?: string): Promise<TableScopeInfo> {
+		const NOT_SCOPED: TableScopeInfo = { scoped: false };
+		try {
+			const target = this.resolveCacheTarget(instance);
+			const cacheKey = `tablescope:${target.cacheNamespace}:${tableName}`;
+			const cached = this.getFromCache<TableScopeInfo>(cacheKey);
+			if (cached) return cached;
+
+			const resp = await target.client.get<{
+				result: Array<{ sys_scope: unknown; 'sys_scope.scope': string }>;
+			}>('/api/now/table/sys_db_object', {
+				sysparm_query: `name=${tableName}`,
+				sysparm_fields: 'sys_scope,sys_scope.scope',
+				sysparm_limit: 1,
+				sysparm_exclude_reference_link: true,
+			});
+
+			const row = resp.result[0];
+			const scopeSysId = normalizeSNRef(row?.sys_scope);
+			const scopeName = row?.['sys_scope.scope'];
+			// A table with no scope, or explicitly scoped to "global", needs no
+			// transaction-scope override.
+			const result: TableScopeInfo =
+				scopeSysId && scopeName && scopeName !== 'global'
+					? { scoped: true, scopeSysId, scopeName }
+					: NOT_SCOPED;
+
+			this.setCache(cacheKey, result);
+			return result;
+		} catch (error) {
+			logger.debug(`Table scope resolution skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return NOT_SCOPED;
 		}
 	}
 

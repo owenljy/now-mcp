@@ -15,6 +15,7 @@ import type {
 } from '../types/servicenow.js';
 import { logger } from '../utils/logger.js';
 import { queryNowSdkWithAlignedProfile } from '../utils/now-sdk-cli.js';
+import { transactionScopeParam } from '../utils/transaction-scope.js';
 import {
 	sanitizeQuery,
 	validatePagination,
@@ -22,6 +23,7 @@ import {
 	validateTableName,
 	validateWriteAccess,
 } from '../utils/validators.js';
+import type { SchemaService } from './schema-service.js';
 
 /** Parse ServiceNow's X-Total-Count header into a number, or null if absent/NaN. */
 function parseTotalCount(raw: string | undefined): number | null {
@@ -47,7 +49,10 @@ export interface QueryRecordsResult<T extends ServiceNowRecord = ServiceNowRecor
 }
 
 export class TableService {
-	constructor(private instanceManager: InstanceManager) {}
+	constructor(
+		private instanceManager: InstanceManager,
+		private schemaService?: SchemaService,
+	) {}
 
 	/**
 	 * Query records from a ServiceNow table
@@ -287,8 +292,10 @@ export class TableService {
 
 		const client = this.instanceManager.getClient(instance);
 		// Exclude reference-link URL metadata from the echoed row — it's noise for
-		// the caller and bloats the returned record.
-		const endpoint = `${API_ENDPOINTS.TABLE_RECORD(tableName)}?sysparm_exclude_reference_link=true`;
+		// the caller and bloats the returned record. Also run the transaction in
+		// the target table's own app scope, if it has one — see transaction-scope.ts.
+		const scopeParam = await transactionScopeParam(this.schemaService, tableName, instance);
+		const endpoint = `${API_ENDPOINTS.TABLE_RECORD(tableName)}?sysparm_exclude_reference_link=true${scopeParam}`;
 
 		logger.debug(`Creating record in ${tableName}`, { data, instance: instance || 'default' });
 
@@ -325,8 +332,10 @@ export class TableService {
 		}
 
 		const client = this.instanceManager.getClient(instance);
-		// Exclude reference-link URL metadata from the echoed row (see createRecord).
-		const endpoint = `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, sysId)}?sysparm_exclude_reference_link=true`;
+		// Exclude reference-link URL metadata from the echoed row, and run in the
+		// target table's own app scope if it has one (see createRecord).
+		const scopeParam = await transactionScopeParam(this.schemaService, tableName, instance);
+		const endpoint = `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, sysId)}?sysparm_exclude_reference_link=true${scopeParam}`;
 
 		logger.debug(`Updating record ${tableName}/${sysId}`, {
 			data,

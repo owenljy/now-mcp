@@ -85,3 +85,17 @@ export interface TableListItem {
 	extends?: string;
 	numberOfRecords?: number;
 }
+
+/**
+ * The application scope that owns a table (sys_db_object.sys_scope), resolved
+ * so writes can run in that scope's transaction context. `scoped: false`
+ * covers both global tables and unresolved lookups (no read access, network
+ * failure) — callers should skip sysparm_transaction_scope in both cases.
+ */
+export interface TableScopeInfo {
+	scoped: boolean;
+	/** sys_scope sys_id. Present only when scoped is true. */
+	scopeSysId?: string;
+	/** Application scope api_name, e.g. "x_snc_myapp". Present only when scoped is true. */
+	scopeName?: string;
+}

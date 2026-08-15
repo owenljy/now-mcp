@@ -256,6 +256,69 @@ test('checkWebServiceAccess serves the second call from cache (client hit once)'
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
 });
 
+function makeTableScopeClient(row) {
+  const state = { calls: 0 };
+  return {
+    state,
+    async get(endpoint, params) {
+      state.calls++;
+      assert.equal(endpoint, '/api/now/table/sys_db_object');
+      assert.equal(params.sysparm_fields, 'sys_scope,sys_scope.scope');
+      assert.equal(params.sysparm_exclude_reference_link, true);
+      return { result: row ? [row] : [] };
+    },
+  };
+}
+
+test('resolveTableScope reports scoped:false for a global table (no sys_scope value)', async () => {
+  const client = makeTableScopeClient({ sys_scope: '', 'sys_scope.scope': '' });
+  const svc = new SchemaService(makeManager(client));
+
+  const result = await svc.resolveTableScope('incident', 'scopeglobal');
+  assert.deepEqual(result, { scoped: false });
+});
+
+test('resolveTableScope reports scoped:false when sys_scope resolves to the literal "global" app', async () => {
+  const client = makeTableScopeClient({ sys_scope: 'f'.repeat(32), 'sys_scope.scope': 'global' });
+  const svc = new SchemaService(makeManager(client));
+
+  const result = await svc.resolveTableScope('sys_user', 'scopeglobalapp');
+  assert.deepEqual(result, { scoped: false });
+});
+
+test('resolveTableScope reports scoped:true with the sys_id and api_name for a scoped table', async () => {
+  const sysId = 'e'.repeat(32);
+  const client = makeTableScopeClient({ sys_scope: sysId, 'sys_scope.scope': 'x_snc_myapp' });
+  const svc = new SchemaService(makeManager(client));
+
+  const result = await svc.resolveTableScope('x_snc_myapp_widget', 'scopedtable');
+  assert.deepEqual(result, { scoped: true, scopeSysId: sysId, scopeName: 'x_snc_myapp' });
+});
+
+test('resolveTableScope reports scoped:false (not a throw) when the probe itself fails', async () => {
+  const client = {
+    async get() {
+      throw new Error('network error');
+    },
+  };
+  const svc = new SchemaService(makeManager(client));
+
+  const result = await svc.resolveTableScope('incident', 'scopefailure');
+  assert.deepEqual(result, { scoped: false });
+});
+
+test('resolveTableScope serves the second call from cache (client hit once)', async () => {
+  const sysId = 'd'.repeat(32);
+  const client = makeTableScopeClient({ sys_scope: sysId, 'sys_scope.scope': 'x_snc_myapp' });
+  const svc = new SchemaService(makeManager(client));
+
+  await svc.resolveTableScope('x_snc_myapp_widget', 'scopecache');
+  assert.equal(client.state.calls, 1);
+
+  await svc.resolveTableScope('x_snc_myapp_widget', 'scopecache');
+  assert.equal(client.state.calls, 1, 'second call should be served from cache');
+});
+
 /**
  * Stub returning dictionary rows in the OBJECT form: internal_type and reference
  * are reference columns on sys_dictionary, so without
