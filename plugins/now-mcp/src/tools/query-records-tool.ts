@@ -14,6 +14,7 @@ import { zeroResultHints } from '../utils/failure-enrichment.js';
 import { preflightReadFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
 import { assessQueryRisk } from '../utils/query-risk.js';
+import { capRendered } from '../utils/render-cap.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
 import { truncateRecordFields } from '../utils/value-truncation.js';
 
@@ -38,37 +39,6 @@ const MAX_SERIALIZED_BYTES = 70_000;
  * syslog `message`) shouldn't be able to eat the whole byte budget by itself
  * and starve out every other row. */
 const MAX_FIELD_VALUE_CHARS = 3000;
-
-/**
- * Cap `records` by row count and serialized size. Returns the (possibly
- * shortened) array plus whether truncation happened. Pure — no side effects.
- */
-function capRenderedRows(records: Record<string, unknown>[]): {
-	rows: Record<string, unknown>[];
-	truncated: boolean;
-} {
-	// Row-count cap first (cheap), then size cap on the survivors.
-	let rows = records.length > MAX_RETURNED_ROWS ? records.slice(0, MAX_RETURNED_ROWS) : records;
-	let truncated = rows.length < records.length;
-
-	if (Buffer.byteLength(JSON.stringify(rows)) > MAX_SERIALIZED_BYTES) {
-		// Binary search for the largest prefix that fits the byte budget.
-		let lo = 0;
-		let hi = rows.length;
-		while (lo < hi) {
-			const mid = Math.ceil((lo + hi) / 2);
-			if (Buffer.byteLength(JSON.stringify(rows.slice(0, mid))) <= MAX_SERIALIZED_BYTES) {
-				lo = mid;
-			} else {
-				hi = mid - 1;
-			}
-		}
-		rows = rows.slice(0, lo);
-		truncated = true;
-	}
-
-	return { rows, truncated };
-}
 
 export const QUERY_RECORDS_TOOL = {
 	name: 'sn_query_records',
@@ -285,9 +255,20 @@ export function createQueryRecordsTool(
 				// Render guardrail: cap the rows that actually reach the caller,
 				// independent of the requested `limit`, so a huge result can't flood the
 				// client context. `renderedRows` is what we serialize.
-				const { rows: renderedRows, truncated: rowsTruncated } =
-					capRenderedRows(fieldCappedRecords);
+				const {
+					rows: renderedRows,
+					truncated: rowsTruncated,
+					truncationReason: rowsTruncationReason,
+				} = capRendered(fieldCappedRecords, {
+					maxRows: MAX_RETURNED_ROWS,
+					maxBytes: MAX_SERIALIZED_BYTES,
+				});
 				const truncated = rowsTruncated || fieldsTruncated;
+				// A byte/row cap on the rows array takes priority over a cell-level cap
+				// for naming *why* truncation happened; only report cell_chars when the
+				// row/byte cap itself never fired.
+				const truncationReason =
+					rowsTruncationReason ?? (fieldsTruncated ? 'cell_chars' : undefined);
 
 				// hasMore: prefer the exact answer from the total count (are there rows
 				// beyond this page's offset+size?); fall back to the page-size heuristic
@@ -319,6 +300,7 @@ export function createQueryRecordsTool(
 					response.truncated = true;
 					response.returnedRows = renderedRows.length;
 					response.fetchedRows = fetchedCount;
+					if (truncationReason) response.truncationReason = truncationReason;
 				}
 				if (fieldsTruncated) {
 					response.fieldsTruncated = true;
@@ -348,9 +330,13 @@ export function createQueryRecordsTool(
 
 				const extraTextParts: string[] = [];
 				if (rowsTruncated) {
+					const reasonNote =
+						rowsTruncationReason === 'row_count'
+							? `row-count cap of ${MAX_RETURNED_ROWS} rows`
+							: `byte cap of ${MAX_SERIALIZED_BYTES} bytes`;
 					extraTextParts.push(
 						`Note: the result was truncated — showing ${renderedRows.length} of ${fetchedCount} fetched rows ` +
-							`(render cap ${MAX_RETURNED_ROWS} rows / ${MAX_SERIALIZED_BYTES} bytes). ` +
+							`(hit the ${reasonNote}). ` +
 							`Narrow the query to see the rest: add filters, select fewer fields, or use sn_aggregate_records for counts/group-by.`,
 					);
 				}

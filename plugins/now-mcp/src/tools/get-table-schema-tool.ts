@@ -8,6 +8,7 @@ import { GetTableSchemaSchema } from '../schemas/schema-schemas.js';
 import type { SchemaService } from '../services/schema-service.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
+import { capRendered } from '../utils/render-cap.js';
 import { toolResult } from '../utils/tool-response.js';
 
 /** ~200 KB of serialized fields before trailing ones are dropped with a note. */
@@ -90,22 +91,10 @@ export function createGetTableSchemaTool(schemaService: SchemaService) {
 				// (hundreds of fields) truncates cleanly at a field boundary instead of
 				// mid-JSON at the text-renderer's char cap.
 				const allFields = schema.fields.map(compactField);
-				let fields = allFields;
-				let fieldsTruncated = false;
-				if (Buffer.byteLength(JSON.stringify(fields)) > MAX_FIELDS_BYTES) {
-					let lo = 0;
-					let hi = fields.length;
-					while (lo < hi) {
-						const mid = Math.ceil((lo + hi) / 2);
-						if (Buffer.byteLength(JSON.stringify(fields.slice(0, mid))) <= MAX_FIELDS_BYTES) {
-							lo = mid;
-						} else {
-							hi = mid - 1;
-						}
-					}
-					fields = fields.slice(0, lo);
-					fieldsTruncated = true;
-				}
+				const { rows: fields, truncated: fieldsTruncated } = capRendered(allFields, {
+					maxRows: Number.POSITIVE_INFINITY,
+					maxBytes: MAX_FIELDS_BYTES,
+				});
 
 				const response: Record<string, unknown> = {
 					success: true,

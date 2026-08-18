@@ -295,6 +295,62 @@ test('server advertises resources and prompts over MCP stdio', { timeout: 30000 
   }
 });
 
+test('advertised surface stays within the token-economy byte ceilings', { timeout: 30000 }, async () => {
+  const transport = new StdioClientTransport({
+    command: 'node',
+    args: ['build/index.js'],
+    cwd: process.cwd(),
+    env: SERVER_ENV,
+  });
+  const client = new Client({ name: 'protocol-contract-test', version: '1.0.0' }, { capabilities: {} });
+
+  try {
+    await client.connect(transport);
+
+    // "Teach it once" (a description, shipped every session) must not become
+    // "teach it expensively once" — no single tool description may balloon.
+    const { tools } = await client.listTools();
+    for (const tool of tools) {
+      const bytes = Buffer.byteLength(tool.description);
+      assert.ok(
+        bytes <= 2100,
+        `tool "${tool.name}" description is ${bytes} bytes — over the 2,100-byte ceiling`
+      );
+    }
+
+    // serverInfo.instructions ships every session too — the one gate no
+    // per-call test can substitute for, since a description edit doesn't
+    // move it but an instructions edit does.
+    const instructions = client.getInstructions();
+    if (instructions) {
+      const bytes = Buffer.byteLength(instructions);
+      assert.ok(bytes <= 3000, `serverInfo.instructions is ${bytes} bytes — over the 3,000-byte ceiling`);
+    }
+
+    // sn_query_records' outputSchema.properties.rows must carry format-teaching
+    // text once the columnar shape exists — written so it's a vacuous pass
+    // today (no `rows` key yet) and a real check from PR3 onward, so PR3 does
+    // not need to add this assertion, only satisfy it.
+    const queryTool = tools.find((t) => t.name === 'sn_query_records');
+    assert.ok(queryTool, 'sn_query_records must be advertised');
+    const rowsSchema = queryTool.outputSchema && queryTool.outputSchema.properties
+      ? queryTool.outputSchema.properties.rows
+      : undefined;
+    if (rowsSchema) {
+      assert.equal(typeof rowsSchema.description, 'string', 'rows must carry a description');
+      assert.ok(rowsSchema.description.length > 0, 'rows description must be non-empty');
+      assert.match(
+        rowsSchema.description,
+        /columns/,
+        'rows description must mention "columns" so the positional contract is taught'
+      );
+    }
+  } finally {
+    await client.close().catch(() => {});
+    await transport.close().catch(() => {});
+  }
+});
+
 test('completions resolve for the schema-template table arg and a prompt arg', { timeout: 30000 }, async () => {
   const transport = new StdioClientTransport({
     command: 'node',

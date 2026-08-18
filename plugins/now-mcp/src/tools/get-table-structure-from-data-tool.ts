@@ -11,9 +11,10 @@ import {
 	GetTableStructureFromDataSchema,
 } from '../schemas/table-structure-schemas.js';
 import type { TableService } from '../services/table-service.js';
-import { analyzeTableStructure, type InferredField } from '../services/table-structure-service.js';
+import { analyzeTableStructure } from '../services/table-structure-service.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
+import { capRendered } from '../utils/render-cap.js';
 import { toolResult } from '../utils/tool-response.js';
 
 /** ~200 KB of serialized fields before trailing ones are dropped with a note — matches get-table-schema-tool. */
@@ -57,23 +58,10 @@ export function createGetTableStructureFromDataTool(tableService: TableService) 
 				// Cap the serialized size of `fields` so a very wide table (or fields with
 				// long sample values) truncates cleanly at a field boundary instead of
 				// mid-JSON at the text-renderer's char cap — matches get-table-schema-tool.
-				const allFields = analysis.fields;
-				let fields: InferredField[] = allFields;
-				let fieldsTruncated = false;
-				if (Buffer.byteLength(JSON.stringify(fields)) > MAX_FIELDS_BYTES) {
-					let lo = 0;
-					let hi = fields.length;
-					while (lo < hi) {
-						const mid = Math.ceil((lo + hi) / 2);
-						if (Buffer.byteLength(JSON.stringify(fields.slice(0, mid))) <= MAX_FIELDS_BYTES) {
-							lo = mid;
-						} else {
-							hi = mid - 1;
-						}
-					}
-					fields = fields.slice(0, lo);
-					fieldsTruncated = true;
-				}
+				const { rows: fields, truncated: fieldsTruncated } = capRendered(analysis.fields, {
+					maxRows: Number.POSITIVE_INFINITY,
+					maxBytes: MAX_FIELDS_BYTES,
+				});
 
 				const response: Record<string, unknown> = {
 					success: true,

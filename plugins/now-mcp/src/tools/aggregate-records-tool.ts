@@ -10,6 +10,7 @@ import { extractQueryFields } from '../utils/encoded-query.js';
 import { toolError } from '../utils/error-handler.js';
 import { preflightReadFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
+import { capRendered } from '../utils/render-cap.js';
 import { toolResult } from '../utils/tool-response.js';
 
 /**
@@ -20,28 +21,6 @@ import { toolResult } from '../utils/tool-response.js';
  */
 const MAX_GROUP_ROWS = 2000;
 const MAX_SERIALIZED_BYTES = 70_000;
-
-function capGroups(groups: unknown[]): { rows: unknown[]; truncated: boolean } {
-	let rows = groups.length > MAX_GROUP_ROWS ? groups.slice(0, MAX_GROUP_ROWS) : groups;
-	let truncated = rows.length < groups.length;
-
-	if (Buffer.byteLength(JSON.stringify(rows)) > MAX_SERIALIZED_BYTES) {
-		let lo = 0;
-		let hi = rows.length;
-		while (lo < hi) {
-			const mid = Math.ceil((lo + hi) / 2);
-			if (Buffer.byteLength(JSON.stringify(rows.slice(0, mid))) <= MAX_SERIALIZED_BYTES) {
-				lo = mid;
-			} else {
-				hi = mid - 1;
-			}
-		}
-		rows = rows.slice(0, lo);
-		truncated = true;
-	}
-
-	return { rows, truncated };
-}
 
 export const AGGREGATE_RECORDS_TOOL = {
 	name: 'sn_aggregate_records',
@@ -135,7 +114,10 @@ export function createAggregateRecordsTool(
 				let fetchedGroups: number | undefined;
 				if (grouped && Array.isArray(result)) {
 					fetchedGroups = result.length;
-					const capped = capGroups(result);
+					const capped = capRendered(result, {
+						maxRows: MAX_GROUP_ROWS,
+						maxBytes: MAX_SERIALIZED_BYTES,
+					});
 					renderedResult = capped.rows;
 					truncated = capped.truncated;
 				}
