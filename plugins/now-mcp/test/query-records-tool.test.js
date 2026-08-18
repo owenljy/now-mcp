@@ -34,7 +34,7 @@ test('403 with ws_access disabled explains the table-level block', async () => {
   const schemaService = makeStubSchemaService({ exists: true, wsAccess: false });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
-  const result = await tool.handler({ tableName: 'sn_grc_indicator' });
+  const result = await tool.handler({ tableName: 'sn_grc_indicator', limit: 5 });
 
   assert.equal(result.isError, true);
   assert.equal(schemaService.calls.length, 1);
@@ -51,7 +51,7 @@ test('403 with ws_access enabled keeps the ACL/role hint', async () => {
   const schemaService = makeStubSchemaService({ exists: true, wsAccess: true });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
-  const result = await tool.handler({ tableName: 'incident' });
+  const result = await tool.handler({ tableName: 'incident', limit: 5 });
 
   const text = result.content.map((c) => c.text).join(' ');
   assert.match(text, /ACL/);
@@ -63,7 +63,7 @@ test('403 falls back to the generic ACL hint when the ws_access probe itself fai
   const schemaService = makeStubSchemaService(null);
   const tool = createQueryRecordsTool(tableService, schemaService);
 
-  const result = await tool.handler({ tableName: 'incident' });
+  const result = await tool.handler({ tableName: 'incident', limit: 5 });
 
   assert.equal(schemaService.calls.length, 1);
   const text = result.content.map((c) => c.text).join(' ');
@@ -80,7 +80,7 @@ test('client-side SERVICENOW_BLOCKED_TABLES denial never triggers the ws_access 
   const schemaService = makeStubSchemaService({ exists: true, wsAccess: false });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
-  await tool.handler({ tableName: 'sn_grc_indicator' });
+  await tool.handler({ tableName: 'sn_grc_indicator', limit: 5 });
 
   assert.equal(schemaService.calls.length, 0, 'the probe should be skipped for client-side blocks');
 });
@@ -92,7 +92,7 @@ test('a non-403 error never triggers the ws_access probe', async () => {
   const schemaService = makeStubSchemaService({ exists: true, wsAccess: false });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
-  await tool.handler({ tableName: 'incident' });
+  await tool.handler({ tableName: 'incident', limit: 5 });
 
   assert.equal(schemaService.calls.length, 0);
 });

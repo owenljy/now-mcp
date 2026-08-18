@@ -100,7 +100,7 @@ test('skipFieldValidation runs the query as written', async () => {
     tableName: 'incident',
     query: 'priorityy=1',
     skipFieldValidation: true,
-    limit: 100,
+    limit: 5,
     offset: 0,
   });
 
@@ -128,7 +128,7 @@ test('an unreadable schema fails open rather than blocking the read', async () =
   const tableService = makeTableService();
   const tool = createQueryRecordsTool(tableService, makeSchema({ unavailable: true }));
 
-  const res = await tool.handler({ tableName: 'incident', query: 'priorityy=1', limit: 100, offset: 0 });
+  const res = await tool.handler({ tableName: 'incident', query: 'priorityy=1', limit: 5, offset: 0 });
 
   assert.equal(res.isError, undefined);
   assert.equal(tableService.state.calls, 1);
@@ -158,7 +158,7 @@ test('aggregate blocks a typo in groupBy', async () => {
   assert.equal(tableService.state.calls, 0);
 });
 
-test('aggregate does not check having/orderBy, which name aggregates not columns', async () => {
+test('aggregate accepts an aggregate-naming having/orderBy pair (calibrated guard, not field validation)', async () => {
   const tableService = makeTableService();
   const tool = createAggregateRecordsTool(tableService, makeSchema());
 

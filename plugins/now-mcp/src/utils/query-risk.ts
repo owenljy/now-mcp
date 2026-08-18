@@ -30,3 +30,30 @@ export function assessQueryRisk(tableName: string, query?: string): QueryRiskAss
 			(hasBranching ? 'Prefer splitting each OR branch into a separate bounded call.' : ''),
 	};
 }
+
+export interface PayloadRiskAssessment {
+	risky: boolean;
+	reasons: string[];
+}
+
+/**
+ * Input-only, zero-I/O preflight for the wasteful-by-construction shape: no
+ * column selection at all, combined with a limit wide enough to matter. The
+ * schema default is `limit: 100`, so a bare `{tableName}` call against a wide
+ * table (e.g. incident, ~200 inherited columns) is exactly the shape this
+ * catches — a 20-row all-column peek stays legal, so this blocks bulk
+ * exploration without blocking exploration itself.
+ */
+export function assessPayloadRisk(input: {
+	fields?: string[];
+	limit: number;
+}): PayloadRiskAssessment {
+	const fieldsOmitted = !input.fields || input.fields.length === 0;
+	if (!fieldsOmitted || input.limit <= 20) return { risky: false, reasons: [] };
+	return {
+		risky: true,
+		reasons: [
+			`fields was omitted and limit (${input.limit}) is over 20 — this returns every column across ${input.limit} rows, which floods context on a wide table.`,
+		],
+	};
+}

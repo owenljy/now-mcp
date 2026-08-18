@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { scoreTaskSet, routeAsk } from './eval/tool-eval-scorer.mjs';
-import { TASKS, BEFORE_DESCRIPTIONS } from './eval/fixtures.mjs';
+import { TASKS, BEFORE_DESCRIPTIONS, BASELINE_DESCRIPTIONS } from './eval/fixtures.mjs';
 
 // Tool-selection eval harness (WS-B §4.3).
 //
@@ -93,6 +93,60 @@ test('eval: trimmed descriptions hold or improve tool-selection vs. the verbose 
   // Param recovery is description-independent but must stay perfect on this set
   // (every task names a known table explicitly).
   assert.equal(afterScore.paramCorrectnessRate, 1, 'every task should recover its table param');
+});
+
+// The set of asks that route to the wrong tool RIGHT NOW, with the shipped
+// (AFTER) descriptions. Frozen at empty: every curated task, including the
+// PR4 steering targets and the negative controls, is expected to route
+// correctly. A previous version of this gate only checked the aggregate
+// RATE against a rolling `before` baseline — measured case: adding cost
+// prose to sn_aggregate_records re-routed one query_records task onto it
+// while breaking a different one the same way, and the RATE stayed flat, so
+// that gate passed while routing had visibly regressed. Comparing the exact
+// SET of misses (not just how many) is what catches a trade like that.
+const EXPECTED_MISS_SET = [];
+
+test('eval: the exact set of misrouted asks matches the frozen expectation — a swap is caught even when the rate does not move', async () => {
+  const after = await loadCandidates();
+  const afterScore = scoreTaskSet(TASKS, Object.values(after));
+  const missSet = afterScore.perTask.filter((t) => !t.toolOk).map((t) => t.ask).sort();
+  assert.deepEqual(
+    missSet,
+    [...EXPECTED_MISS_SET].sort(),
+    'the set of misrouted asks changed — update EXPECTED_MISS_SET deliberately if this miss is now accepted, ' +
+      'rather than letting a rate-only check wave it through'
+  );
+});
+
+test('eval: every task whose expected tool is sn_aggregate_records routes correctly (subset rate === 1)', async () => {
+  const after = await loadCandidates();
+  const afterScore = scoreTaskSet(TASKS, Object.values(after));
+  const aggregateTasks = afterScore.perTask.filter((t) => t.expectedTool === 'sn_aggregate_records');
+  assert.ok(aggregateTasks.length > 0, 'sanity: at least one aggregate task must exist in TASKS');
+  const hits = aggregateTasks.filter((t) => t.toolOk).length;
+  assert.equal(
+    hits,
+    aggregateTasks.length,
+    `expected every sn_aggregate_records task to route correctly, got ${hits}/${aggregateTasks.length}:\n` +
+      JSON.stringify(aggregateTasks.filter((t) => !t.toolOk), null, 2)
+  );
+});
+
+test('eval: current shipped descriptions do not regress tool-selection vs. the immediately-prior (BASELINE) shipped text', async () => {
+  const after = await loadCandidates();
+  const afterCandidates = Object.values(after);
+  const baselineCandidates = afterCandidates.map((c) =>
+    BASELINE_DESCRIPTIONS[c.name] ? { ...c, description: BASELINE_DESCRIPTIONS[c.name] } : c
+  );
+
+  const baseline = scoreTaskSet(TASKS, baselineCandidates);
+  const afterScore = scoreTaskSet(TASKS, afterCandidates);
+
+  assert.ok(
+    afterScore.toolSelectionRate >= baseline.toolSelectionRate,
+    `current descriptions regressed tool-selection vs. the immediately-prior baseline: ` +
+      `baseline=${baseline.toolSelectionRate} after=${afterScore.toolSelectionRate}`
+  );
 });
 
 test('eval scorer is deterministic and decoupled from a single description', async () => {

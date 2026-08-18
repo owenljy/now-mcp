@@ -27,7 +27,7 @@ export const QueryRecordsSchema = z.object({
 		.optional()
 		.default('safe')
 		.describe(
-			"Default 'safe' rejects predictably expensive unbounded text scans on high-volume tables. Use allow_expensive only after reviewing scan cost.",
+			"Default 'safe' rejects predictably expensive unbounded text scans on high-volume tables, and also rejects fields-omitted calls with limit>20 (returns every column, floods context). Use allow_expensive only after reviewing the cost.",
 		),
 	limit: z
 		.number()
@@ -106,6 +106,15 @@ export const AggregateRecordsSchema = z.object({
 		.default(false)
 		.describe(
 			'Return display values (names) for group-by reference fields — set true when grouping by a reference field to avoid a second sys_id→name lookup.',
+		),
+	topGroups: z
+		.number()
+		.int()
+		.positive()
+		.max(500)
+		.optional()
+		.describe(
+			'Return only the top N groups by the ordering criterion. Shapes the RESPONSE, not the database scan — the Stats API has no row limit, so this slices after fetching. Defaults orderBy to "DESCcount" when count is requested and no orderBy is given; errors if neither count nor orderBy is set, since an unordered "top N" is meaningless.',
 		),
 	skipFieldValidation: skipFieldValidationField.default(false),
 });

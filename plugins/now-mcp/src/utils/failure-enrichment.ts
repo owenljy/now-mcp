@@ -7,6 +7,8 @@
  * extra API calls.
  */
 
+import { extractQueryFields } from './encoded-query.js';
+
 export interface FailureContext {
 	table?: string;
 	/** Free-form label of the operation for logging/future use (not branched on). */
@@ -183,6 +185,13 @@ export function zeroResultHints(ctx: FailureContext = {}): string[] {
 	hints.push(
 		'Confirm field values with sn_get_choice_list, or check the table with sn_get_table_schema.',
 	);
+	const queryFields = ctx.query ? extractQueryFields(ctx.query) : [];
+	if (queryFields.length > 0) {
+		const field = queryFields[0];
+		hints.push(
+			`To see which values actually exist for ${field}, call sn_aggregate_records {groupBy:["${field}"],count:true} — one call, and it shows real values rather than configured choices.`,
+		);
+	}
 	return hints;
 }
 

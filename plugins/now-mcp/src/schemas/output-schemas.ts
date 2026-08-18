@@ -79,6 +79,13 @@ export const QueryRecordsOutputSchema = z.object({
 		totalMatching: z.number().optional(),
 	}),
 	hints: z.unknown().optional(),
+	// A single, ready-to-run steering string — never an array (R1: no room to
+	// accumulate). Present only when the call was not already optimal.
+	costHint: z.string().optional(),
+	// Attached only when the costHint's rule computed one (≤3 columns, ≤12
+	// distinct values each) — the hint text itself carries the mandatory
+	// "this page only" disclaimer, so this is never read without that context.
+	distributions: z.record(z.record(z.number())).optional(),
 	// Conditions that make the returned rows misleading rather than wrong — e.g.
 	// journal fields read without displayValue, or an `expand` that had to fall
 	// back to dot-walking. Present only when something needs saying.
@@ -98,6 +105,8 @@ export const AggregateRecordsOutputSchema = z.object({
 	truncated: z.boolean().optional(),
 	returnedGroups: z.number().optional(),
 	fetchedGroups: z.number().optional(),
+	// Present when topGroups sliced the result — the true pre-slice group count.
+	totalGroups: z.number().optional(),
 });
 
 /**

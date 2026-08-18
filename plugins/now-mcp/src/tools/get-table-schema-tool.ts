@@ -24,8 +24,8 @@ function fieldToRow(f: FieldMetadata): unknown[] {
 export const GET_TABLE_SCHEMA_TOOL = {
 	name: 'sn_get_table_schema',
 	title: 'Get table schema',
-	description: `What: Get a ServiceNow table's fields and their data types — each field's name, type, mandatory/readonly flags (always explicit booleans), max length, and (for reference fields) the table it points to.
-When to use: To discover what fields/columns and data types a table defines, before querying or writing. For the valid values of one choice field use sn_get_choice_list. To inspect a referenced table's own fields, call this tool again with that table name.
+	description: `What: Get a ServiceNow table's field definitions and constraints — each field's name, data type, mandatory/readonly flags (always explicit booleans), max length, and (for reference fields) the table it points to.
+When to use: To discover what fields/columns, data types, and constraints a table defines, before querying or writing. For the valid values of one choice field use sn_get_choice_list. To inspect a referenced table's own fields, call this tool again with that table name.
 Preconditions: Table must exist; the account needs read access.
 Produces: {columns, rows} — one row per field, columns = ['name','type','mandatory','readOnly','maxLength','reference']; cached ~15 min in memory, up to 24h on disk. Set includeExtended=true to include inherited parent-table fields.
 

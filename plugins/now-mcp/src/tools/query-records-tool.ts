@@ -14,8 +14,9 @@ import { toolError } from '../utils/error-handler.js';
 import { zeroResultHints } from '../utils/failure-enrichment.js';
 import { preflightReadFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
-import { assessQueryRisk } from '../utils/query-risk.js';
+import { assessPayloadRisk, assessQueryRisk } from '../utils/query-risk.js';
 import { capRendered } from '../utils/render-cap.js';
+import { computeCostHint, createCostHintDecayState } from '../utils/result-economics.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
 import { truncateRecordFields } from '../utils/value-truncation.js';
 
@@ -46,19 +47,21 @@ export const QUERY_RECORDS_TOOL = {
 	name: 'sn_query_records',
 	title: 'Query records',
 	description: `What: List/fetch/read the actual record rows from a ServiceNow table, with filters, field selection, dot-walking, and pagination.
-When to use: To retrieve the rows themselves — show me / fetch / find matching records. For counts, group-by, or avg/sum/min/max use sn_aggregate_records instead.
-Preconditions: Table must exist; the account needs read access to it.
-Produces: An array of the matching records (plus pagination metadata, and recovery hints when empty).
+When to use: To retrieve the rows themselves — show me / fetch / find matching records. If you only need numbers about the rows (how many, group-by, avg/sum/min/max), use sn_aggregate_records instead.
+Preconditions: Table must exist; read access. Pass fields with the columns you need — omitting it returns every column and, with limit over 20, is blocked under queryPolicy:'safe'.
+Produces: {columns, rows} — rows[i][j] pairs against columns[j] (plus pagination metadata, recovery hints when empty).
+
+Payload cost: an unread column is still fetched and re-paid every later turn. fields:[...] is the lever; a 20-row all-column peek is always allowed if you need to see what's available first.
 
 Encoded query goes in the query param (operators: = != ^ ^OR > < >= <= LIKE STARTSWITH ENDSWITH IN ISEMPTY ISNOTEMPTY; dot-walk reference fields, e.g. caller_id.department.name=Network).
 
 Field names in query/fields are checked against the table schema first, because ServiceNow SILENTLY IGNORES an unknown field in an encoded query — priorityy=1 returns the whole table with HTTP 200 and no error. A typo is reported here instead of quietly widening the result; skipFieldValidation:true runs the query as written.
 
-Journal fields (comments, work_notes) read back EMPTY unless displayValue is set — the entry stream with timestamps and authors only exists in the display value. Use displayValue:"all" to get them.
+Journal fields (comments, work_notes) read back EMPTY unless displayValue is set — the entry stream lives only in the display value. Use displayValue:"all" to get it.
 
 expand pulls fields from referenced records in one request, e.g. expand={"caller_id":["name","email"]} — one level deep, and requires fields to be listed.
 
-A 403 is auto-diagnosed against the table's web-service access flag, so the returned hint distinguishes "this table blocks all REST access regardless of role" from "your account lacks the required role/ACL" — trust that hint over re-investigating roles manually.
+A 403 is auto-diagnosed against the table's web-service access flag: the returned hint distinguishes a table-wide REST block from a missing role/ACL — trust it over re-investigating roles manually.
 
 Examples:
 - tableName="incident", query="priority=1^state=2", fields=["number","short_description"]
@@ -72,6 +75,9 @@ export function createQueryRecordsTool(
 	schemaService: SchemaService,
 	graphqlService?: GraphqlService,
 ) {
+	// Per-process decay for cost hints (R6) — one state per tool instance, so
+	// tests constructing a fresh tool get isolated counters.
+	const costHintDecay = createCostHintDecayState();
 	return {
 		...QUERY_RECORDS_TOOL,
 		handler: async (params: unknown) => {
@@ -119,6 +125,30 @@ export function createQueryRecordsTool(
 				if (fieldError) {
 					return {
 						content: [{ type: 'text' as const, text: fieldError }],
+						isError: true as const,
+					};
+				}
+
+				// Payload-cost gate: wired AFTER field-name correctness (a typo'd field
+				// silently widening a read must be reported regardless of policy), but
+				// still before any I/O — input-only, zero-cost to check.
+				const payloadRisk = assessPayloadRisk({
+					fields: validated.fields,
+					limit: validated.limit,
+				});
+				if (validated.queryPolicy === 'safe' && payloadRisk.risky) {
+					const blocked = {
+						blocked: true,
+						reason: 'Query blocked by the safe query policy before it was sent to ServiceNow.',
+						table: validated.tableName,
+						reasons: payloadRisk.reasons,
+						hint:
+							'Name the columns you need with fields:[...], or use sn_aggregate_records if you only ' +
+							'need numbers about the rows. To explore first, re-run at limit:20 — every column is ' +
+							'allowed there — then re-query with the fields you picked.',
+					};
+					return {
+						content: [{ type: 'text' as const, text: toolText(blocked) }],
 						isError: true as const,
 					};
 				}
@@ -331,6 +361,28 @@ export function createQueryRecordsTool(
 						table: validated.tableName,
 						query: validated.query,
 					});
+				} else {
+					// Cost hints only make sense on a successful, non-empty result — a
+					// missed hint costs the status quo, a false hint costs tokens AND
+					// teaches the caller to skip hints, so this stays conservative.
+					const { costHint, distributions } = computeCostHint(
+						{
+							table: validated.tableName,
+							fields: validated.fields,
+							query: validated.query,
+							limit: validated.limit,
+							fetchedCount,
+							totalMatching,
+							truncated,
+							expandUsed: Boolean(expand),
+							queryPolicy: validated.queryPolicy,
+							columns,
+							rows: renderedRows,
+						},
+						costHintDecay,
+					);
+					if (costHint) response.costHint = costHint;
+					if (distributions) response.distributions = distributions;
 				}
 
 				if (warnings.length > 0) {
