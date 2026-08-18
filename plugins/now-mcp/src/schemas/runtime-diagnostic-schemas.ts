@@ -26,7 +26,11 @@ export const GetRuntimeEventsSchema = z
 export const GetRuntimeEventsOutputSchema = z.object({
 	success: z.boolean(),
 	since: z.string(),
-	groups: z.record(z.array(z.record(z.unknown()))),
-	diagnostics: z.record(z.record(z.unknown())),
-	evidenceLimitations: z.array(z.string()),
+	groups: z.record(
+		z.object({
+			columns: z.array(z.string()),
+			rows: z.array(z.array(z.unknown())),
+		}),
+	),
+	diagnostics: z.record(z.object({ rows: z.number(), queries: z.number() })),
 });

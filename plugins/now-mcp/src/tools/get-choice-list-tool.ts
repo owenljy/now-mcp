@@ -5,9 +5,14 @@
 import { GetChoiceListOutputSchema } from '../schemas/output-schemas.js';
 import { GetChoiceListSchema } from '../schemas/schema-schemas.js';
 import type { SchemaService } from '../services/schema-service.js';
+import { toColumnar } from '../utils/columnar.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
+import { capRendered } from '../utils/render-cap.js';
 import { toolResult } from '../utils/tool-response.js';
+
+const MAX_RETURNED_ROWS = 1000;
+const MAX_SERIALIZED_BYTES = 45_000;
 
 export const GET_CHOICE_LIST_TOOL = {
 	name: 'sn_get_choice_list',
@@ -15,7 +20,7 @@ export const GET_CHOICE_LIST_TOOL = {
 	description: `What: Get the valid values for a choice (dropdown) field — label and value pairs, in display order.
 When to use: Before setting a choice field, to learn its allowed values. For all of a table's fields use sn_get_table_schema.
 Preconditions: Table and field must exist; read access.
-Produces: An array of {label, value} choices (cached ~15 min in memory, up to 24h on disk). An empty array means the field isn't a choice field or the name is wrong — check sn_get_table_schema.`,
+Produces: {columns, rows} — one row per choice (label, value). Zero rows means the field isn't a choice field or the name is wrong — check sn_get_table_schema.`,
 	inputSchema: GetChoiceListSchema,
 	outputSchema: GetChoiceListOutputSchema,
 };
@@ -43,16 +48,31 @@ export function createGetChoiceListTool(schemaService: SchemaService) {
 					target.name,
 				);
 
+				const { columns, rows } = toColumnar(choices as Record<string, unknown>[]);
+				const {
+					rows: renderedRows,
+					truncated,
+					truncationReason,
+				} = capRendered(rows, {
+					maxRows: MAX_RETURNED_ROWS,
+					maxBytes: MAX_SERIALIZED_BYTES,
+					reservedBytes: Buffer.byteLength(JSON.stringify(columns)),
+				});
+
 				// Format response for LLM
 				const response: Record<string, unknown> = {
 					success: true,
 					table: validated.tableName,
 					field: validated.fieldName,
-					choiceCount: choices.length,
-					choices: choices,
+					choiceCount: renderedRows.length,
 					instance: target.name,
-					instanceUrl: target.url,
+					columns,
+					rows: renderedRows,
 				};
+				if (truncated) {
+					response.truncated = true;
+					if (truncationReason) response.truncationReason = truncationReason;
+				}
 
 				// An empty choice list usually means a misspelled or non-choice field —
 				// steer the caller to the schema rather than returning a silent []. The
@@ -65,7 +85,7 @@ export function createGetChoiceListTool(schemaService: SchemaService) {
 
 				return toolResult(
 					response,
-					`${choices.length} choice(s) for ${validated.tableName}.${validated.fieldName}${
+					`${renderedRows.length} choice(s) for ${validated.tableName}.${validated.fieldName}${
 						choices.length === 0 ? ' — see hints' : ''
 					}`,
 				);

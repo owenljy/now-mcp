@@ -20,6 +20,9 @@ the protocol for resolving each against whatever is actually connected.
   `sn_query_records`, not a mandate): table name (string), an encoded
   query string, a `fields` array, a `limit`, and an optional display-value flag
   for reference-field labels.
+- **Reference output shape** (now-mcp): rows come back as `{columns:[...],
+  rows:[[...]]}` — pair `rows[i]` positionally against `columns`, not as
+  `{records:[{...}]}`.
 - **Used by:** `sn-aia-agent-audit`, `sn-aia-agent-builder`,
   `sn-aia-trace-analyzer`, `sn-eval-runner-builder`.
 

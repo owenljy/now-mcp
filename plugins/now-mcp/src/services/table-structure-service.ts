@@ -101,16 +101,16 @@ interface FieldAccumulator {
 export interface InferredField {
 	name: string;
 	inferredType: string;
+	/** "<nonEmptyCount>/<total>" — always-populated is nonEmptyCount===total, never-populated is nonEmptyCount===0; both are derivable from this, so they aren't carried as separate top-level lists. */
 	populatedRatio: string;
 	isReference: boolean;
+	/** The referenced table, when derivable from the reference link. Only present when isReference is true. */
+	reference?: string;
 	sampleValues: string[];
 }
 
 export interface TableStructureAnalysis {
 	recordsSampled: number;
-	alwaysPopulated: string[];
-	neverPopulated: string[];
-	referenceFields: Array<{ field: string; referencesTable?: string }>;
 	fields: InferredField[];
 }
 
@@ -160,32 +160,16 @@ export function analyzeTableStructure(
 					}
 				}
 
-				if (field.sampleValues.length < 3) {
-					field.sampleValues.push(toSampleString(value));
+				if (field.sampleValues.length < 2) {
+					field.sampleValues.push(toSampleString(value).slice(0, 80));
 				}
 			}
 		}
 	}
 
-	const alwaysPopulated: string[] = [];
-	const neverPopulated: string[] = [];
-	const referenceFields: Array<{ field: string; referencesTable?: string }> = [];
 	const fields: InferredField[] = [];
 
 	for (const [name, field] of acc) {
-		// Always populated: non-empty in every sampled record.
-		if (total > 0 && field.nonEmptyCount === total) {
-			alwaysPopulated.push(name);
-		}
-		// Never populated: seen but never non-empty.
-		if (field.nonEmptyCount === 0) {
-			neverPopulated.push(name);
-		}
-
-		if (field.isReference) {
-			referenceFields.push({ field: name, referencesTable: field.referencesTable });
-		}
-
 		const inferredType = field.typeOrder.length > 0 ? field.typeOrder[0] : 'unknown';
 
 		fields.push({
@@ -193,15 +177,13 @@ export function analyzeTableStructure(
 			inferredType,
 			populatedRatio: `${field.nonEmptyCount}/${total}`,
 			isReference: field.isReference,
+			...(field.isReference && field.referencesTable ? { reference: field.referencesTable } : {}),
 			sampleValues: field.sampleValues,
 		});
 	}
 
 	return {
 		recordsSampled: total,
-		alwaysPopulated,
-		neverPopulated,
-		referenceFields,
 		fields,
 	};
 }

@@ -11,7 +11,7 @@ function incidentRow(i) {
 	return {
 		sys_id: i.toString(16).padStart(32, '0'),
 		number: `INC00${1000 + i}`,
-		short_description: `Sample incident short description number ${i}`,
+		short_description: `Net down site ${i}`,
 		priority: String((i % 4) + 1),
 		state: String((i % 6) + 1),
 		assignment_group: i % 3 === 0 ? 'Network' : i % 3 === 1 ? 'Service Desk' : 'App Support',

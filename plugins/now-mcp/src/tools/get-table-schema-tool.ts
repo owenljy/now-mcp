@@ -11,31 +11,23 @@ import { logger } from '../utils/logger.js';
 import { capRendered } from '../utils/render-cap.js';
 import { toolResult } from '../utils/tool-response.js';
 
-/** ~200 KB of serialized fields before trailing ones are dropped with a note. */
-const MAX_FIELDS_BYTES = 200_000;
+/** ~60 KB of serialized fields before trailing ones are dropped with a note. */
+const MAX_FIELDS_BYTES = 60_000;
 
-/**
- * Compact a field for the wire: keep name/type always; include mandatory/readOnly
- * only when true (the common case is false, so emitting `false` is pure noise —
- * matches how maxLength/reference are already omitted when empty); drop the human
- * `label` (rarely needed to build a query and roughly doubles per-field bytes).
- */
-function compactField(f: FieldMetadata): Record<string, unknown> {
-	const out: Record<string, unknown> = { name: f.name, type: f.type };
-	if (f.mandatory) out.mandatory = true;
-	if (f.readOnly) out.readOnly = true;
-	if (f.maxLength !== undefined) out.maxLength = f.maxLength;
-	if (f.reference) out.reference = f.reference;
-	return out;
+/** Fixed column order — see GetTableSchemaOutputSchema for why mandatory/readOnly are always explicit booleans, never omitted. */
+const FIELD_COLUMNS = ['name', 'type', 'mandatory', 'readOnly', 'maxLength', 'reference'];
+
+function fieldToRow(f: FieldMetadata): unknown[] {
+	return [f.name, f.type, !!f.mandatory, !!f.readOnly, f.maxLength ?? null, f.reference ?? null];
 }
 
 export const GET_TABLE_SCHEMA_TOOL = {
 	name: 'sn_get_table_schema',
 	title: 'Get table schema',
-	description: `What: Get a ServiceNow table's fields and their data types — each field's name, type, mandatory/readonly flags (present only when true), max length, and (for reference fields) the table it points to.
+	description: `What: Get a ServiceNow table's fields and their data types — each field's name, type, mandatory/readonly flags (always explicit booleans), max length, and (for reference fields) the table it points to.
 When to use: To discover what fields/columns and data types a table defines, before querying or writing. For the valid values of one choice field use sn_get_choice_list. To inspect a referenced table's own fields, call this tool again with that table name.
 Preconditions: Table must exist; the account needs read access.
-Produces: An array of field definitions (cached ~15 min in memory, up to 24h on disk). Set includeExtended=true to include inherited parent-table fields.
+Produces: {columns, rows} — one row per field, columns = ['name','type','mandatory','readOnly','maxLength','reference']; cached ~15 min in memory, up to 24h on disk. Set includeExtended=true to include inherited parent-table fields.
 
 Example: tableName="incident"`,
 	inputSchema: GetTableSchemaSchema,
@@ -87,13 +79,14 @@ export function createGetTableSchemaTool(schemaService: SchemaService) {
 					};
 				}
 
-				// Compact each field, then cap the serialized size so a very wide table
-				// (hundreds of fields) truncates cleanly at a field boundary instead of
-				// mid-JSON at the text-renderer's char cap.
-				const allFields = schema.fields.map(compactField);
-				const { rows: fields, truncated: fieldsTruncated } = capRendered(allFields, {
+				// Materialize each field as a fixed-column row, then cap the serialized
+				// size so a very wide table (hundreds of fields) truncates cleanly at a
+				// row boundary instead of mid-JSON at the text-renderer's char cap.
+				const allRows = schema.fields.map(fieldToRow);
+				const { rows, truncated: fieldsTruncated } = capRendered(allRows, {
 					maxRows: Number.POSITIVE_INFINITY,
 					maxBytes: MAX_FIELDS_BYTES,
+					reservedBytes: Buffer.byteLength(JSON.stringify(FIELD_COLUMNS)),
 				});
 
 				const response: Record<string, unknown> = {
@@ -102,14 +95,14 @@ export function createGetTableSchemaTool(schemaService: SchemaService) {
 					label: schema.label,
 					extends: schema.extends,
 					fieldCount: schema.fields.length,
-					fields,
+					columns: FIELD_COLUMNS,
+					rows,
 					instance: target.name,
-					instanceUrl: target.url,
 				};
 				if (fieldsTruncated) response.fieldsTruncated = true;
 
 				const summary = `${schema.fields.length} field(s) on ${schema.name}${
-					fieldsTruncated ? ` (showing ${fields.length})` : ''
+					fieldsTruncated ? ` (showing ${rows.length})` : ''
 				}`;
 				return toolResult(response, summary);
 			} catch (error) {

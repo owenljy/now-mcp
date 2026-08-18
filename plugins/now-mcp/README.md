@@ -166,6 +166,15 @@ returns the full entry stream with timestamps and authors.
 | `sn_delete_records` | Delete **one or many** records by sys_id (destructive); verifies deletion by default in a single extra request |
 | `sn_diff_records` | Compare two records on a table field-by-field; returns only what differs |
 
+Read tools that return rows (`sn_query_records`, `sn_list_tables`,
+`sn_get_choice_list`) use a columnar shape: `{columns: string[], rows:
+unknown[][]}` instead of an array of row objects. `rows[i][j]` is the value of
+`columns[j]` for row `i` — this removes the cost of repeating every field name
+once per row, which is the largest structural waste in a typical result.
+`null` means that column was not returned for that row (e.g. a field-level ACL
+stripped it, surfaced loudly via `columnsNotReturned`); `""` means the value
+itself is an empty string — the two are never coerced into each other.
+
 One tool per operation, whatever the cardinality: the write tools take a list, and
 one record is a list of length one. Cardinality is data, not a different
 operation — and a separate batch tool has a second cost beyond the extra choice,

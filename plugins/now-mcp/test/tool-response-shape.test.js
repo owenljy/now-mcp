@@ -51,7 +51,7 @@ function fakeTableServiceForCreate(created) {
 	};
 }
 
-test('get_table_schema compacts fields: name/type always, falsey booleans omitted, no label', async () => {
+test('get_table_schema materializes fixed columns with explicit booleans, never omitted', async () => {
 	const fields = [
 		{
 			name: 'short_description',
@@ -67,22 +67,26 @@ test('get_table_schema compacts fields: name/type always, falsey booleans omitte
 	const res = await tool.handler({ tableName: 'incident' });
 	const out = res.structuredContent;
 
-	const byName = Object.fromEntries(out.fields.map((f) => [f.name, f]));
-	// name + type always present
-	assert.equal(byName.short_description.type, 'string');
-	// mandatory:true kept; readOnly:false omitted
-	assert.equal(byName.short_description.mandatory, true);
-	assert.ok(!('readOnly' in byName.short_description), 'readOnly:false is omitted');
-	assert.equal(byName.short_description.maxLength, 160);
-	// readOnly:true kept; mandatory:false omitted
-	assert.equal(byName.sys_id.readOnly, true);
-	assert.ok(!('mandatory' in byName.sys_id), 'mandatory:false is omitted');
-	// label dropped entirely from every field
-	assert.ok(out.fields.every((f) => !('label' in f)), 'per-field label is dropped');
+	assert.deepEqual(out.columns, ['name', 'type', 'mandatory', 'readOnly', 'maxLength', 'reference']);
+	const idx = Object.fromEntries(out.columns.map((c, i) => [c, i]));
+	const byName = Object.fromEntries(out.rows.map((row) => [row[idx.name], row]));
+
+	// mandatory:true / readOnly:false are both explicit booleans — false is
+	// never omitted, since columnar null already means "column not returned".
+	assert.equal(byName.short_description[idx.type], 'string');
+	assert.equal(byName.short_description[idx.mandatory], true);
+	assert.equal(byName.short_description[idx.readOnly], false);
+	assert.equal(byName.short_description[idx.maxLength], 160);
+	assert.equal(byName.short_description[idx.reference], null);
+	// readOnly:true kept explicit; mandatory:false stays an explicit false, not omitted
+	assert.equal(byName.sys_id[idx.readOnly], true);
+	assert.equal(byName.sys_id[idx.mandatory], false);
+	// label was never a column at all
+	assert.ok(!out.columns.includes('label'), 'label is not a column');
 	// summary text does not carry the field payload
 	assert.match(res.content[0].text, /2 field\(s\) on incident/);
 	assert.equal(out.instance, 'dev');
-	assert.equal(out.instanceUrl, 'https://dev.service-now.com');
+	assert.ok(!('instanceUrl' in out), 'instanceUrl dropped — available from sn_connection_status');
 });
 
 test('a single-record create echoes sys_id + only the fields the caller set, not the whole row', async () => {
@@ -106,23 +110,29 @@ test('a single-record create echoes sys_id + only the fields the caller set, not
 	assert.ok(!('message' in out), 'prose message field dropped');
 });
 
-test('query_records summary is thin and rows stay in structuredContent', async () => {
+test('query_records summary is thin and columnar rows stay in structuredContent', async () => {
 	const rows = [{ sys_id: 'a'.repeat(32), number: 'INC1' }];
 	const tableService = {
 		async queryRecordsWithMeta() {
 			return { records: rows, totalCount: 1 };
 		},
 	};
-	const tool = createQueryRecordsTool(tableService);
-	const res = await tool.handler({ tableName: 'incident', limit: 100, offset: 0 });
+	const schemaService = {
+		async journalFieldsAmong() { return []; },
+		async validateFields() { return null; },
+	};
+	const tool = createQueryRecordsTool(tableService, schemaService);
+	const res = await tool.handler({ tableName: 'incident', fields: ['sys_id', 'number'], limit: 100, offset: 0 });
+	const out = res.structuredContent;
 
-	assert.deepEqual(res.structuredContent.records, rows, 'rows live in structuredContent');
+	assert.deepEqual(out.columns, ['sys_id', 'number']);
+	assert.deepEqual(out.rows, [['a'.repeat(32), 'INC1']], 'rows live in structuredContent, columnar');
 	assert.match(res.content[0].text, /1 row\(s\)/);
 	assert.ok(!res.content[0].text.includes('INC1'), 'row data not duplicated into the summary text');
-	// counts/truncation stay in the body; _meta is instance/duration plus which
-	// transport served the read (table-api vs graphql, when expand is used).
-	assert.deepEqual(Object.keys(res._meta).sort(), ['durationMs', 'instance', 'transport']);
-	assert.equal(res._meta.transport, 'table-api');
+	// counts/truncation stay in the body; transport is in the body too, not
+	// duplicated into _meta.
+	assert.deepEqual(Object.keys(res._meta).sort(), ['durationMs', 'instance']);
+	assert.equal(out.transport, 'table-api');
 });
 
 test('a multi-record create response drops successRate and prose message', async () => {

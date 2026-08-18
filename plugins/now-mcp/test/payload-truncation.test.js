@@ -22,13 +22,18 @@ test('query_records truncates an oversized field value without dropping the row'
 			};
 		},
 	};
-	const tool = createQueryRecordsTool(tableService);
-	const res = await tool.handler({ tableName: 'syslog', limit: 5, offset: 0 });
+	const schemaService = {
+		async journalFieldsAmong() { return []; },
+		async validateFields() { return null; },
+	};
+	const tool = createQueryRecordsTool(tableService, schemaService);
+	const res = await tool.handler({ tableName: 'syslog', fields: ['sys_id', 'message'], limit: 5, offset: 0 });
 	const out = res.structuredContent;
 
-	assert.equal(out.records.length, 1, 'row is kept, not dropped');
-	assert.ok(out.records[0].message.length < hugeMessage.length, 'field value was shortened');
-	assert.match(out.records[0].message, /truncated \d+ chars/);
+	assert.equal(out.rows.length, 1, 'row is kept, not dropped');
+	const messageCell = out.rows[0][out.columns.indexOf('message')];
+	assert.ok(messageCell.length < hugeMessage.length, 'field value was shortened');
+	assert.match(messageCell, /truncated \d+ chars/);
 	assert.equal(out.fieldsTruncated, true);
 });
 

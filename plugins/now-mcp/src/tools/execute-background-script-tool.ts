@@ -25,14 +25,16 @@ export const EXECUTE_BACKGROUND_SCRIPT_TOOL = {
 	name: 'sn_execute_background_script',
 	title: 'Execute background script',
 	description: `What: Run server-side JavaScript in ServiceNow using the instance's configured execution transport: scriptApiPath when set, otherwise a temporary sys_trigger, then return logged output.
-When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for plain reads and the create/update/delete record tools for ordinary CRUD. In particular, to remove known records, call sn_delete_records FIRST; do not substitute GlideRecord.deleteRecord() merely because this tool is more general.
-Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the configured Scripted REST resource must be installed, active, and executable by the integration user. Without scriptApiPath, the integration user must be able to create/read/delete the temporary sys_properties and sys_trigger records. Timeout default 60s, max 2m.
+When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for plain reads and the create/update/delete record tools for ordinary CRUD; call sn_delete_records FIRST for known-record deletion rather than GlideRecord.deleteRecord() merely because this tool is more general.
+Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the configured Scripted REST resource must be installed, active, and executable by the integration user; without it, the integration user must be able to create/read/delete temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
 
-WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only: it does not grant roles, bypass ACLs, or repair a missing Scripted REST endpoint. Runtime identity/privileges are determined by the configured ServiceNow endpoint or scheduled-job context.
+WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only — it grants no roles, bypasses no ACLs. Runtime identity/privileges come from the configured endpoint or scheduled-job context.
 
-Write policy (governs writes INSIDE the script body): writes require allowWrites:true. Metadata/security/config writes require BOTH allowWrites:true and allowMetadataWrites:true; prefer Fluent source control. Detection is heuristic; unresolved targets yield lowConfidenceWarning.
+Write policy (writes INSIDE the script body): requires allowWrites:true; metadata/security/config writes additionally require allowMetadataWrites:true (prefer Fluent source control). Detection is heuristic; unresolved targets yield lowConfidenceWarning.
 
-Runtime (ServiceNow Rhino, NOT Node): call log(...) to return output (gs.log/info/print are rewritten to it; return values are discarded). In scoped contexts prefer gs.info over gs.print (print is global-scope-only). Synchronous only — no import/require, no setTimeout/Promise/await. Use GlideRecordSecure + canWrite() for writes and setLimit() on queries. Referenced table/field names are schema-checked first; unknown ones return in "schemaCheck" (advisory — the script still runs).`,
+Runtime (ServiceNow Rhino, NOT Node): call log(...) for output (gs.log/info/print are rewritten to it; return values discarded). Prefer gs.info over gs.print in scoped contexts. Synchronous only — no import/require/setTimeout/Promise/await. Use GlideRecordSecure + canWrite() and setLimit(). Referenced table/field names are schema-checked; unknown ones return in "schemaCheck" (advisory only).
+
+runtimeContext.observedIdentity, when present, does not imply ACL bypass. A null/false write result is not proof of persistence — verify by rereading. queueDelayMs (sys_trigger path) includes queue/poll/cleanup time. transportConfiguration is echoed once per instance per process, not every call.`,
 	inputSchema: ExecuteBackgroundScriptSchema,
 	outputSchema: ExecuteScriptOutputSchema,
 };
@@ -41,6 +43,10 @@ export function createExecuteBackgroundScriptTool(
 	scriptService: ScriptService,
 	schemaService?: SchemaService,
 ) {
+	// transportConfiguration is a per-instance constant for the life of this
+	// process — echo it once per instance rather than on every call. A fresh
+	// Set per createExecuteBackgroundScriptTool() call keeps tests isolated.
+	const reportedTransportConfig = new Set<string>();
 	return {
 		...EXECUTE_BACKGROUND_SCRIPT_TOOL,
 		handler: async (params: unknown) => {
@@ -126,15 +132,27 @@ export function createExecuteBackgroundScriptTool(
 				);
 
 				let output = result.output ?? null;
-				let outputTruncated = result.outputTruncated ?? false;
+				// Two distinct causes, kept distinct: the transport itself may have
+				// already truncated (sys_trigger's mailbox column width), or THIS
+				// tool's own MAX_OUTPUT_CHARS slice may fire on top (mainly the
+				// scripted-REST fast path, which has no transport cap at all). Bug #4
+				// was conflating both under one `truncationReason: 'mailbox_limit'`.
+				const transportTruncated = result.outputTruncated ?? false;
+				let localTruncated = false;
 				const outputOriginalChars =
 					result.outputOriginalChars ?? (typeof output === 'string' ? output.length : 0);
 				if (typeof output === 'string' && output.length > MAX_OUTPUT_CHARS) {
-					outputTruncated = true;
+					localTruncated = true;
 					output = `${output.slice(0, MAX_OUTPUT_CHARS)}\n…[truncated ${
 						output.length - MAX_OUTPUT_CHARS
 					} chars — narrow the script's logging (fewer/shorter gs.info calls, or aggregate before logging)]`;
 				}
+				const outputTruncated = transportTruncated || localTruncated;
+				const truncationReason = localTruncated
+					? ('render_cap' as const)
+					: transportTruncated
+						? ('mailbox_limit' as const)
+						: undefined;
 
 				let applicationResult: unknown;
 				let applicationSuccess: boolean | undefined;
@@ -164,41 +182,44 @@ export function createExecuteBackgroundScriptTool(
 				const overallSuccess =
 					result.success && applicationSuccess !== false && !resultContractError;
 
+				const instanceKey = validated.instance || 'default';
+				const reportTransportConfig =
+					result.outcome !== 'completed' || !reportedTransportConfig.has(instanceKey);
+				if (reportTransportConfig) reportedTransportConfig.add(instanceKey);
+
 				// Format response for LLM
 				const response = {
 					success: overallSuccess,
-					transportSuccess: result.success,
+					// Only surfaced when it disagrees with `success` — e.g. the transport
+					// completed fine but the script's own JSON result said success:false.
+					...(result.success !== overallSuccess ? { transportSuccess: result.success } : {}),
 					...(applicationSuccess !== undefined ? { applicationSuccess } : {}),
 					...(applicationResult !== undefined ? { applicationResult } : {}),
 					executionTime: result.executionTime,
 					output,
-					...(outputTruncated ? { outputTruncated: true } : {}),
-					outputOriginalChars,
-					outputReturnedChars: typeof output === 'string' ? output.length : 0,
-					...(outputTruncated ? { truncationReason: 'mailbox_limit' as const } : {}),
-					...(result.executionPath === 'sys_trigger'
+					...(outputTruncated
 						? {
-								queueDelayMs: result.executionTime,
-								timingNote:
-									'Scheduler fallback total time includes mailbox setup, queue delay, polling, and cleanup; execution time cannot be isolated.',
+								outputTruncated: true,
+								outputOriginalChars,
+								outputReturnedChars: typeof output === 'string' ? output.length : 0,
+								truncationReason,
 							}
 						: {}),
-					error: result.error ?? null,
-					instance: validated.instance || 'default',
-					transportConfiguration: scriptService.getExecutionTransportStatus(validated.instance),
+					...(result.executionPath === 'sys_trigger' ? { queueDelayMs: result.executionTime } : {}),
+					...(result.error ? { error: result.error } : {}),
+					instance: instanceKey,
+					...(reportTransportConfig
+						? {
+								transportConfiguration: scriptService.getExecutionTransportStatus(
+									validated.instance,
+								),
+							}
+						: {}),
 					executionPath: result.executionPath,
 					outcome: result.outcome,
-					runtimeContext: {
-						serverRuntime: 'ServiceNow Rhino' as const,
-						transport: result.executionPath,
-						...(result.runtimeIdentity ? { observedIdentity: result.runtimeIdentity } : {}),
-						identityNote:
-							result.executionPath === 'sys_trigger'
-								? 'Observed inside the scheduled job. This identity and its listed roles do not imply ACL bypass or unrestricted access.'
-								: 'The configured Scripted REST endpoint controls execution identity; now-mcp cannot infer it unless the endpoint returns it.',
-						writeResultContract:
-							'GlideRecord insert/update normally returns a sys_id; deleteRecord returns boolean. A null/false result is not proof of persistence—verify by rereading the record.',
-					},
+					...(result.runtimeIdentity
+						? { runtimeContext: { observedIdentity: result.runtimeIdentity } }
+						: {}),
 					...(schemaCheck ? { schemaCheck } : {}),
 					...(writeDetection.hasWrites && validated.allowWrites
 						? {

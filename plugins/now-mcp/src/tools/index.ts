@@ -113,8 +113,6 @@ function withLogging(
 				_meta: {
 					instance: instance || 'default',
 					durationMs,
-					operationId,
-					verification: 'not_supported',
 					...(result._meta ?? {}),
 				},
 			};

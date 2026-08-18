@@ -18,24 +18,54 @@ import { z } from 'zod';
 export const OpenRecord = z.record(z.unknown());
 
 /**
+ * Shared columnar shape: `columns` names each cell position, `rows` is an
+ * array of arrays positionally aligned with `columns` — `rows[i][j]` is the
+ * value of `columns[j]` for row `i`. Removes the cost of repeating every
+ * field name once per row (43.5% of the payload on the case that motivated
+ * this). `null` means the column was not returned for that row (e.g.
+ * field-level ACL stripped it, or it's the fields-omitted union-of-keys case
+ * and a later row introduced a key this row never had); `""` means the value
+ * itself is an empty string — the two are never coerced into each other. A
+ * cell may itself be an object/array (e.g. under `expand` or
+ * `displayValue:"all"`).
+ */
+function columnarShape(itemNoun: string) {
+	return {
+		columns: z
+			.array(z.string())
+			.describe(
+				'Column names, in order. Every array in `rows` has exactly this many entries, positionally aligned: rows[i][j] is the value of columns[j].',
+			),
+		rows: z
+			.array(z.array(z.unknown()))
+			.describe(
+				`Each entry is one ${itemNoun}, as an array of cell values aligned 1:1 with \`columns\` (rows[i][j] corresponds to columns[j]). A cell is null when that column was not returned for this row (e.g. field-level ACL stripped it); it is "" when the value itself is an empty string. A cell may itself be an object/array under expand or displayValue:"all".`,
+			),
+	};
+}
+
+/**
  * sn_query_records
  *
- * `records` is the array actually returned to the caller, which may be a
+ * `rows` is the array actually returned to the caller, which may be a
  * truncated view of what the query matched (render guardrail — see the tool).
- * When truncation kicks in, `truncated` is true and `returnedRows` /
+ * When truncation kicks in, `truncated` is true and `truncationReason` /
  * `fetchedRows` describe the cut so the caller can narrow the query.
  */
 export const QueryRecordsOutputSchema = z.object({
 	success: z.boolean(),
 	table: z.string(),
-	// Rows returned in this page (after the render cap).
+	// Rows returned in this page (after the render cap) — equals rows.length.
 	count: z.number(),
-	records: z.array(OpenRecord),
-	// Render guardrail: true when `records` was capped below the fetched result,
+	...columnarShape('matching record'),
+	// Requested columns absent from every returned row — the previously-silent
+	// field-level-ACL-strip case, now loud.
+	columnsNotReturned: z.array(z.string()).optional(),
+	// Render guardrail: true when `rows` was capped below the fetched result,
 	// or when a field value within a returned row was truncated.
 	truncated: z.boolean().optional(),
-	// Rows actually included in `records` after the render cap.
-	returnedRows: z.number().optional(),
+	// Which cap fired: row-count, byte-size, or a per-cell character cap.
+	truncationReason: z.enum(['row_count', 'row_bytes', 'cell_chars']).optional(),
 	// Rows fetched in this page before the render cap was applied.
 	fetchedRows: z.number().optional(),
 	// True when one or more field values were shortened (row count untouched).
@@ -114,18 +144,30 @@ function normalizeSNRef(val: unknown): string | undefined {
 	return undefined;
 }
 
-/** sn_get_table_schema */
+/**
+ * sn_get_table_schema
+ *
+ * `fields`' columns are fixed and always fully materialized — `mandatory`/
+ * `readOnly` are explicit `false` rather than omitted-and-implied, because
+ * columnar `null` already means something else (column not returned for this
+ * row) and reusing it for "false" would make an absent flag look like an
+ * unknown one, which is silently wrong about which fields are mandatory.
+ */
 export const GetTableSchemaOutputSchema = z.object({
 	success: z.boolean(),
 	table: z.string(),
 	label: z.string().optional(),
 	extends: z.preprocess(normalizeSNRef, z.string().optional()),
 	fieldCount: z.number(),
-	fields: z.array(OpenRecord),
-	// True when a very wide table's fields were capped at a field boundary.
+	columns: z
+		.array(z.string())
+		.describe(
+			"Fixed order: ['name','type','mandatory','readOnly','maxLength','reference']. mandatory/readOnly are always explicit booleans (never null); maxLength/reference are null when not applicable.",
+		),
+	rows: z.array(z.array(z.unknown())),
+	// True when a very wide table's fields were capped at a row boundary.
 	fieldsTruncated: z.boolean().optional(),
 	instance: z.string(),
-	instanceUrl: z.string().url(),
 });
 
 /** sn_list_tables */
@@ -134,8 +176,9 @@ export const ListTablesOutputSchema = z.object({
 	count: z.number(),
 	filter: z.string().optional(),
 	instance: z.string(),
-	instanceUrl: z.string().url(),
-	tables: z.array(OpenRecord),
+	...columnarShape('table'),
+	truncated: z.boolean().optional(),
+	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
 });
 
 /** sn_get_choice_list */
@@ -144,9 +187,10 @@ export const GetChoiceListOutputSchema = z.object({
 	table: z.string(),
 	field: z.string(),
 	choiceCount: z.number(),
-	choices: z.array(OpenRecord),
 	instance: z.string(),
-	instanceUrl: z.string().url(),
+	...columnarShape('choice'),
+	truncated: z.boolean().optional(),
+	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
 });
 
 /** sn_execute_background_script */
@@ -161,9 +205,8 @@ export const ExecuteScriptOutputSchema = z.object({
 	outputTruncated: z.boolean().optional(),
 	outputOriginalChars: z.number().optional(),
 	outputReturnedChars: z.number().optional(),
-	truncationReason: z.literal('mailbox_limit').optional(),
+	truncationReason: z.enum(['mailbox_limit', 'render_cap']).optional(),
 	queueDelayMs: z.number().optional(),
-	timingNote: z.string().optional(),
 	error: z.string().nullable().optional(),
 	instance: z.string(),
 	transportConfiguration: z
@@ -178,20 +221,17 @@ export const ExecuteScriptOutputSchema = z.object({
 		.optional(),
 	executionPath: z.enum(['scripted-rest', 'sys_trigger']).optional(),
 	outcome: z.enum(['completed', 'script_failed', 'timed_out']).optional(),
+	// Slimmed to just the observed identity — identityNote/writeResultContract
+	// were static prose, moved into the tool description. Omitted entirely when
+	// the transport didn't report an identity.
 	runtimeContext: z
 		.object({
-			serverRuntime: z.literal('ServiceNow Rhino'),
-			transport: z.string(),
-			observedIdentity: z
-				.object({
-					userName: z.string().optional(),
-					userId: z.string().optional(),
-					roles: z.string().optional(),
-					isInteractive: z.boolean().optional(),
-				})
-				.optional(),
-			identityNote: z.string(),
-			writeResultContract: z.string(),
+			observedIdentity: z.object({
+				userName: z.string().optional(),
+				userId: z.string().optional(),
+				roles: z.string().optional(),
+				isInteractive: z.boolean().optional(),
+			}),
 		})
 		.optional(),
 	schemaCheck: z.array(OpenRecord).optional(),

@@ -57,7 +57,8 @@ test('get-security-info default response omits raw detail arrays and resolves ro
 
   assert.equal(data.acls.details, undefined);
   assert.equal(data.roleRequirements, undefined);
-  assert.deepEqual(data.rolesByOperation, { read: ['itil'] });
+  assert.equal(data.dictionary, undefined, 'dictionary is gated behind includeDetails too');
+  assert.deepEqual(data.aclRoleGroups.map((g) => g.requiredRolesAnyOf), [['itil']]);
   assert.equal(data.acls.total, 1);
   assert.equal(data.acls.byOperation.read, 1);
 
@@ -74,7 +75,8 @@ test('get-security-info includeDetails:true returns the raw arrays too', async (
 
   assert.equal(data.acls.details.length, 1);
   assert.equal(data.roleRequirements.length, 1);
-  assert.deepEqual(data.rolesByOperation, { read: ['itil'] });
+  assert.deepEqual(data.dictionary, [], 'dictionary is queried and included once includeDetails is set');
+  assert.deepEqual(data.aclRoleGroups.map((g) => g.requiredRolesAnyOf), [['itil']]);
 });
 
 test('get-security-info preserves per-ACL any-of role semantics', async () => {
@@ -113,16 +115,52 @@ test('get-security-info preserves per-ACL any-of role semantics', async () => {
   const result = await createGetSecurityInfoTool(tableService).handler({ tableName: 'incident' });
   const data = result.structuredContent;
 
-  assert.deepEqual(data.rolesByOperation, { delete: ['admin', 'maint'] });
   assert.deepEqual(data.aclRoleGroups, [{
     aclSysId: ACL_ID,
     name: 'incident',
     operation: 'delete',
     active: true,
     adminOverrides: false,
-    roleRequirement: 'any_of',
+    // roleRequirement dropped — derivable as requiredRolesAnyOf.length > 0.
     requiredRolesAnyOf: ['admin', 'maint'],
     hasCondition: true,
     hasScript: true,
   }]);
+});
+
+test('get-security-info omits hasCondition/hasScript (not false) when the ACL has neither', async () => {
+  const tableService = {
+    async queryRecords(table) {
+      if (table === 'sys_security_acl') {
+        return [{ sys_id: ACL_ID, name: 'incident', operation: 'read', active: 'true', admin_overrides: 'false' }];
+      }
+      return [];
+    },
+  };
+  const result = await createGetSecurityInfoTool(tableService).handler({ tableName: 'incident' });
+  const [group] = result.structuredContent.aclRoleGroups;
+  assert.equal('hasCondition' in group, false);
+  assert.equal('hasScript' in group, false);
+});
+
+test('get-security-info strips the raw script from beforeBusinessRules while keeping hasAbortAction', async () => {
+  const tableService = {
+    async queryRecords(table) {
+      if (table === 'sys_script') {
+        return [
+          {
+            sys_id: 'c'.repeat(32),
+            name: 'Abort on close',
+            when: 'before',
+            script: "if (current.state == 7) { current.setAbortAction(true); }",
+          },
+        ];
+      }
+      return [];
+    },
+  };
+  const result = await createGetSecurityInfoTool(tableService).handler({ tableName: 'incident' });
+  const [br] = result.structuredContent.beforeBusinessRules;
+  assert.equal(br.hasAbortAction, true);
+  assert.equal('script' in br, false, 'the raw script body must not be echoed back');
 });

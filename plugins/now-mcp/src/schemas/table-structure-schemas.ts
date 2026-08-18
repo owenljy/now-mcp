@@ -34,23 +34,21 @@ export const GetTableStructureFromDataOutputSchema = z.object({
 	success: z.boolean(),
 	table: z.string(),
 	recordsSampled: z.number(),
-	alwaysPopulated: z.array(z.string()),
-	neverPopulated: z.array(z.string()),
-	referenceFields: z.array(
-		z.object({
-			field: z.string(),
-			referencesTable: z.string().optional(),
-		}),
-	),
 	fields: z.array(
 		z.object({
 			name: z.string(),
 			inferredType: z.string(),
+			// "<nonEmptyCount>/<total>" — always/never-populated are derivable from
+			// this, so they aren't carried as separate top-level lists.
 			populatedRatio: z.string(),
 			isReference: z.boolean(),
+			// The referenced table, when derivable from the reference link. Only
+			// present when isReference is true.
+			reference: z.string().optional(),
 			sampleValues: z.array(z.string()),
 		}),
 	),
+	fieldsTruncated: z.boolean().optional(),
 });
 
 export type GetTableStructureFromDataOutput = z.infer<typeof GetTableStructureFromDataOutputSchema>;

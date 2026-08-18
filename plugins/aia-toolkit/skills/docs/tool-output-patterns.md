@@ -136,15 +136,16 @@ This doc defines the four canonical output shapes the `sn-aia-agent-builder` ski
 ```jsonc
 {
   "count": 3,
-  "records": [
-    { "sys_id": "...", "number": "KB0001234", "short_description": "..." },
-    { "sys_id": "...", "number": "KB0001235", "short_description": "..." },
-    { "sys_id": "...", "number": "KB0001236", "short_description": "..." }
+  "columns": ["sys_id", "number", "short_description"],
+  "rows": [
+    ["...", "KB0001234", "..."],
+    ["...", "KB0001235", "..."],
+    ["...", "KB0001236", "..."]
   ]
 }
 ```
 
-Instructions should explicitly tell the LLM to iterate `records[]` and use each row's fields, not pass the wrapper to another tool.
+Instructions should explicitly tell the LLM that `rows[i]` pairs positionally against `columns` (not as `{records:[{...}]}`), and to use each row's fields rather than pass the wrapper to another tool. This is the same convention now-mcp's own read tools use — see `mcp-capability-resolution.md`.
 
 ---
 

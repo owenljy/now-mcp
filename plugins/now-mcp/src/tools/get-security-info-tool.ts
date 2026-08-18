@@ -30,19 +30,11 @@ export const GET_SECURITY_INFO_TOOL = {
 	description: `What: A consolidated view of what protects a table — ACLs (access controls), per-ACL role alternatives, active data policies, and security-related business rules.
 When to use: To understand why access to a table/field is granted or denied, or to audit a table's security posture, without querying each security table separately.
 Preconditions: The table should exist. Read access to the security metadata tables (sys_security_acl, sys_data_policy2, sys_script) — a section you cannot read is returned empty with a note in warnings, the call still succeeds.
-Produces (default, includeDetails=false): effectiveAccess (see below), acls {total, byOperation, tableLevel, fieldLevel}, aclRoleGroups (the roles attached to each ACL are any-of alternatives), rolesByOperation (a lossy inventory only—not a combined requirement), dataPolicies, securityBusinessRules, warnings. ACL role, condition, and script checks on one ACL are conjunctive; admin only bypasses an ACL when adminOverrides is true. Pass includeDetails=true to also get the raw ACL and ACL-role rows.
+Produces (default, includeDetails=false): effectiveAccess (evaluated for the credentials this MCP connects with via graphql _table_metadata and per-field metadata — a null verdict means the platform did not report that flag, not that access is denied; field verdicts are read off one sample record, so a per-record ACL condition is only reflected when recordSysId pins the record you care about), acls {total, byOperation, tableLevel, fieldLevel}, aclRoleGroups (the roles attached to each ACL are any-of alternatives — requiredRolesAnyOf.length>0 is the requirement), dataPolicies, securityBusinessRules, warnings. ACL role, condition, and script checks on one ACL are conjunctive; admin only bypasses an ACL when adminOverrides is true. Pass includeDetails=true to also get the raw ACL and ACL-role rows, and the sys_dictionary listing.
 effectiveAccess is the one section that answers WHETHER rather than why: ServiceNow's own canRead/canWrite/canCreate/canDelete verdict for the user this MCP authenticates as (plus per-field canRead/canWrite when you pass fields). Trust it over any reading of the ACL rows — instances do carry ACLs with admin_overrides=false, so even an admin gets false here. It is the API user's verdict specifically; sn_diagnose_mutation reports the background-script identity, which usually differs.`,
 	inputSchema: GetSecurityInfoSchema,
 	outputSchema: GetSecurityInfoOutputSchema,
 };
-
-/** Verbatim in the response so a caller cannot mistake one answer for the other. */
-const EFFECTIVE_ACCESS_NOTE =
-	'ServiceNow evaluated this for the credentials this MCP connects with. It is the ' +
-	'decision; the ACL sections explain how it was reached. A null verdict means the ' +
-	'platform did not report that flag, not that access is denied. Field verdicts are ' +
-	'read off one sample record, so a per-record ACL condition is only reflected when ' +
-	'recordSysId pins the record you care about.';
 
 export function createGetSecurityInfoTool(
 	tableService: TableService,
@@ -167,21 +159,26 @@ export function createGetSecurityInfoTool(
 						],
 						100,
 					),
-					safeQuery(
-						'sys_dictionary',
-						`name=${t}^elementISNOTEMPTY`,
-						[
-							'sys_id',
-							'name',
-							'element',
-							'internal_type',
-							'reference',
-							'reference_cascade_rule',
-							'read_only',
-							'mandatory',
-						],
-						300,
-					),
+					// Full sys_dictionary listing (300 rows, every column) is only useful for
+					// the includeDetails=true audit case — skip the round trip entirely
+					// otherwise, rather than fetching it and hiding the result.
+					includeDetails
+						? safeQuery(
+								'sys_dictionary',
+								`name=${t}^elementISNOTEMPTY`,
+								[
+									'sys_id',
+									'name',
+									'element',
+									'internal_type',
+									'reference',
+									'reference_cascade_rule',
+									'read_only',
+									'mandatory',
+								],
+								300,
+							)
+						: Promise.resolve({ records: [] as ServiceNowRecord[] }),
 					accessProbe(),
 				]);
 
@@ -193,7 +190,6 @@ export function createGetSecurityInfoTool(
 						return false;
 					return true;
 				});
-				const aclById = new Map(aclRecords.map((acl) => [acl.sys_id, acl]));
 
 				// Resolve role requirements for the ACLs found. displayValue: 'all' turns
 				// each reference field into {value, display_value} so the role comes back
@@ -260,22 +256,6 @@ export function createGetSecurityInfoTool(
 					}
 				}
 
-				const rolesByOperationSets: Record<string, Set<string>> = {};
-				for (const role of roleRecords) {
-					const aclId = refValue(role.sys_security_acl);
-					const roleName = refDisplay(role.sys_user_role) ?? refValue(role.sys_user_role);
-					const acl = aclId ? aclById.get(aclId) : undefined;
-					const operation =
-						acl && typeof acl.operation === 'string' ? acl.operation : (acl?.operation ?? '');
-					const operationKey = String(operation || 'unknown');
-					if (!roleName) continue;
-					(rolesByOperationSets[operationKey] ??= new Set()).add(roleName);
-				}
-				const rolesByOperation: Record<string, string[]> = {};
-				for (const [operation, names] of Object.entries(rolesByOperationSets)) {
-					rolesByOperation[operation] = Array.from(names).sort();
-				}
-
 				// A single ACL's Requires role list is an any-of list. Do not flatten
 				// roles across ACLs and present that union as one authorization rule:
 				// ACL evaluation also depends on matching table/field ACLs and each
@@ -293,17 +273,17 @@ export function createGetSecurityInfoTool(
 				const aclRoleGroups = aclRecords.map((acl) => {
 					const aclSysId = String(acl.sys_id ?? '');
 					const requiredRolesAnyOf = Array.from(roleNamesByAcl.get(aclSysId) ?? []).sort();
+					// roleRequirement dropped — derivable as requiredRolesAnyOf.length > 0.
+					// hasCondition/hasScript: omit-if-false, since most ACLs have neither.
 					return {
 						aclSysId,
 						name: String(acl.name ?? ''),
 						operation: String(acl.operation ?? ''),
 						active: booleanValue(acl.active),
 						adminOverrides: booleanValue(acl.admin_overrides),
-						roleRequirement:
-							requiredRolesAnyOf.length > 0 ? ('any_of' as const) : ('none' as const),
 						requiredRolesAnyOf,
-						hasCondition: hasValue(acl.condition),
-						hasScript: hasValue(acl.script),
+						...(hasValue(acl.condition) ? { hasCondition: true } : {}),
+						...(hasValue(acl.script) ? { hasScript: true } : {}),
 					};
 				});
 
@@ -314,14 +294,11 @@ export function createGetSecurityInfoTool(
 					const access = accessResult.result;
 					effectiveAccess = {
 						available: true,
-						source: 'graphql _table_metadata and per-field metadata',
-						identity: 'the ServiceNow user this MCP authenticates as',
 						...(validated.recordSysId ? { evaluatedAgainstRecord: validated.recordSysId } : {}),
 						table: access.table,
 						fields: access.fields,
 						fieldVerdicts: access.fieldVerdicts,
 						unresolvedFields: access.unresolvedFields,
-						note: EFFECTIVE_ACCESS_NOTE,
 					};
 					if (access.fieldVerdicts === 'no_sample_row') {
 						warnings.push(
@@ -355,18 +332,20 @@ export function createGetSecurityInfoTool(
 					effectiveAccess,
 					acls,
 					aclRoleGroups,
-					rolesByOperation,
 					dataPolicies: dataPolicyResult.records,
 					securityBusinessRules: businessRuleResult.records,
-					beforeBusinessRules: beforeBrResult.records.map((br) => ({
-						...br,
-						hasAbortAction: String(br.script ?? '').includes('setAbortAction'),
-					})),
-					dictionary: dictionaryResult.records,
+					beforeBusinessRules: beforeBrResult.records.map((br) => {
+						const { script, ...rest } = br;
+						return {
+							...rest,
+							hasAbortAction: String(script ?? '').includes('setAbortAction'),
+						};
+					}),
 				};
 				if (includeDetails) {
 					acls.details = aclRecords;
 					response.roleRequirements = roleRecords;
+					response.dictionary = dictionaryResult.records;
 				}
 				if (warnings.length > 0) {
 					response.warnings = warnings;

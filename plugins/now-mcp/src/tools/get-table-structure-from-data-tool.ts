@@ -26,7 +26,7 @@ export const GET_TABLE_STRUCTURE_FROM_DATA_TOOL = {
 	description: `What: Infer a table's structure by sampling actual records — per-field inferred type, how often each field is populated, and which fields are references.
 When to use: As a fallback for sn_get_table_schema when the sys_dictionary is thin or misleading (legacy/custom tables), or to see which fields are actually used vs. always empty in practice.
 Preconditions: Read access; the table must exist and contain records (an empty table yields no fields).
-Produces: recordsSampled, alwaysPopulated / neverPopulated field lists, referenceFields (with the referenced table when derivable from the reference link), and a fields array of {name, inferredType, populatedRatio, isReference, sampleValues}.
+Produces: recordsSampled and a fields array of {name, inferredType, populatedRatio ("<nonEmpty>/<total>" — always/never-populated read off this directly), isReference, reference (the referenced table, when derivable), sampleValues (up to 2, each capped at 80 chars)}.
 
 Example: tableName="u_legacy_table", sampleSize=20 (sampleSize defaults to 5).`,
 	inputSchema: GetTableStructureFromDataSchema,

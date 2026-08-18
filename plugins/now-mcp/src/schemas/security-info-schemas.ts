@@ -69,10 +69,11 @@ export const GetSecurityInfoOutputSchema = z.object({
 			operation: z.string(),
 			active: z.boolean(),
 			adminOverrides: z.boolean(),
-			roleRequirement: z.enum(['none', 'any_of']),
+			// roleRequirement dropped — derivable as requiredRolesAnyOf.length > 0.
 			requiredRolesAnyOf: z.array(z.string()),
-			hasCondition: z.boolean(),
-			hasScript: z.boolean(),
+			// Omit-if-false idiom: usually false, so absence means false.
+			hasCondition: z.boolean().optional(),
+			hasScript: z.boolean().optional(),
 		}),
 	),
 	/**
@@ -87,8 +88,6 @@ export const GetSecurityInfoOutputSchema = z.object({
 	effectiveAccess: z.union([
 		z.object({
 			available: z.literal(true),
-			source: z.string(),
-			identity: z.string(),
 			evaluatedAgainstRecord: z.string().optional(),
 			table: z.object({
 				label: z.string().optional(),
@@ -111,14 +110,12 @@ export const GetSecurityInfoOutputSchema = z.object({
 			),
 			fieldVerdicts: z.enum(['resolved', 'not_requested', 'no_sample_row']),
 			unresolvedFields: z.array(z.string()),
-			note: z.string(),
 		}),
 		z.object({
 			available: z.literal(false),
 			reason: z.string(),
 		}),
 	]),
-	rolesByOperation: z.record(z.array(z.string())),
 	roleRequirements: z.array(OpenRecord).optional(),
 	dataPolicies: z.array(OpenRecord),
 	securityBusinessRules: z.array(OpenRecord),

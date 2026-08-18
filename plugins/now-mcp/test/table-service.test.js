@@ -97,6 +97,11 @@ test('queryRecordsWithMeta returns X-Total-Count and passes excludeReferenceLink
     excludeReferenceLink: true,
   });
 
+  // out.records stays Record<string,unknown>[] — never columnarized at the
+  // service layer. The columnar {columns,rows} projection lives only at the
+  // tool boundary (query-records-tool.ts); get-runtime-events-tool.ts's
+  // row.sys_id dedupe (pre-columnarization) depends on services handing back
+  // plain row objects, so this shape is load-bearing, not incidental.
   assert.equal(out.records.length, 1);
   assert.equal(out.totalCount, 4200);
   assert.equal(client.calls[0].params.sysparm_exclude_reference_link, true);

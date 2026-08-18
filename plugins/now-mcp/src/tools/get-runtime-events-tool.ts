@@ -3,8 +3,13 @@ import {
 	GetRuntimeEventsSchema,
 } from '../schemas/runtime-diagnostic-schemas.js';
 import type { TableService } from '../services/table-service.js';
+import { toColumnar } from '../utils/columnar.js';
 import { toolError } from '../utils/error-handler.js';
 import { toolResult } from '../utils/tool-response.js';
+import { truncateRecordFields } from '../utils/value-truncation.js';
+
+/** syslog `message` is unbounded — cap per-field before columnarizing. */
+const MAX_FIELD_VALUE_CHARS = 1000;
 
 const CONFIG = {
 	logs: { table: 'syslog', fields: ['sys_id', 'sys_created_on', 'level', 'source', 'message'] },
@@ -25,7 +30,7 @@ function encode(value: string): string {
 export const GET_RUNTIME_EVENTS_TOOL = {
 	name: 'sn_get_runtime_events',
 	title: 'Get bounded runtime events',
-	description: `Read-only, bounded observability across recent syslog, sys_trigger, and sysevent rows. A time bound is mandatory and each message term is queried separately to avoid broad OR scans. Results are evidence, not proof of absence: trigger rows are ephemeral and readable logs may be incomplete.`,
+	description: `Read-only, bounded observability across recent syslog, sys_trigger, and sysevent rows. A time bound is mandatory and each message term is queried separately to avoid broad OR scans. Results are evidence, not proof of absence: no trigger row may mean completed-and-deleted, never queued, inaccessible, or outside the time window; no matching log means only that no matching readable row was found; and direct invocation isolates a dependency without proving a Business Rule or flow trigger path ran. Produces per-kind {columns, rows} groups (fixed field order) plus per-kind diagnostics {rows, queries}.`,
 	inputSchema: GetRuntimeEventsSchema,
 	outputSchema: GetRuntimeEventsOutputSchema,
 };
@@ -40,8 +45,8 @@ export function createGetRuntimeEventsTool(tableService: TableService) {
 					? new Date(input.since)
 					: new Date(Date.now() - (input.lookbackMinutes as number) * 60_000);
 				const lowerBound = since.toISOString().slice(0, 19).replace('T', ' ');
-				const groups: Record<string, Record<string, unknown>[]> = {};
-				const diagnostics: Record<string, Record<string, unknown>> = {};
+				const groups: Record<string, { columns: string[]; rows: unknown[][] }> = {};
+				const diagnostics: Record<string, { rows: number; queries: number }> = {};
 
 				for (const kind of input.include) {
 					const config = CONFIG[kind];
@@ -79,12 +84,12 @@ export function createGetRuntimeEventsTool(tableService: TableService) {
 						);
 						for (const row of records) unique.set(String(row.sys_id ?? JSON.stringify(row)), row);
 					}
-					groups[kind] = [...unique.values()].slice(0, input.limitPerSource);
+					const kindRows = [...unique.values()].slice(0, input.limitPerSource);
+					const { records: fieldCapped } = truncateRecordFields(kindRows, MAX_FIELD_VALUE_CHARS);
+					groups[kind] = toColumnar(fieldCapped, [...config.fields]);
 					diagnostics[kind] = {
-						table: config.table,
-						rows: groups[kind].length,
-						bounded: true,
-						separateMessageQueries: terms.length,
+						rows: kindRows.length,
+						queries: terms.length,
 					};
 				}
 
@@ -93,11 +98,6 @@ export function createGetRuntimeEventsTool(tableService: TableService) {
 					since: since.toISOString(),
 					groups,
 					diagnostics,
-					evidenceLimitations: [
-						'No trigger row may mean completed-and-deleted, never queued, inaccessible, or outside the time window.',
-						'No matching log means only that no matching readable row was found.',
-						'Direct invocation isolates a dependency; it does not prove a Business Rule or flow trigger path ran.',
-					],
 				};
 				return toolResult(response, `bounded runtime diagnostics since ${response.since}`);
 			} catch (error) {

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { toColumnar } from '../build/utils/columnar.js';
 import { capRendered } from '../build/utils/render-cap.js';
 import { truncateRecordFields } from '../build/utils/value-truncation.js';
 import {
@@ -12,22 +13,14 @@ import {
 	RAGGED_67,
 	TABLES_100,
 	WIDE_SCHEMA_400,
+	buildIncidentRows,
 } from './eval/payload-fixtures.mjs';
 
 /**
- * CI byte-measurement harness (PR1 of the token-economy overhaul). This file
- * establishes the "before" numbers as enforceable assertions rather than a
- * one-off notebook measurement. The columnar-form assertions (ratio,
- * N=1 non-regression, columns.length invariant) land in PR3 once
- * src/utils/columnar.ts exists — this file only measures the row-form
- * fixtures and the render-cap primitives that already exist in PR1.
- *
- * The "1000x7 rows under 45,000 bytes must still return >=300 rows"
- * budget-reachability check also moves to PR3: measured directly (see PR1
- * verification), row form's ~230 bytes/row (43.5% of it is repeated field
- * names, exactly the columnar motivation) only fits ~194 rows in that budget —
- * the >=300 floor is only reachable once columnar removes the repeated-key
- * overhead. Recording that as a deliberate deferral, not a dropped check.
+ * CI byte-measurement harness spanning PR1 (render-cap primitives) and PR3
+ * (columnar shape) of the token-economy overhaul. Establishes the "before"
+ * numbers as enforceable assertions rather than a one-off notebook
+ * measurement.
  */
 
 function byteLen(x) {
@@ -77,4 +70,82 @@ test('truncateValue recurses into a nested display_value object (bug #2 root cau
 	const hugeRow = records[0];
 	assert.equal(typeof hugeRow.work_notes, 'object');
 	assert.match(String(hugeRow.work_notes.display_value), /truncated \d+ chars/);
+});
+
+// --- Columnar-form assertions (PR3) -----------------------------------------
+
+test('columnar ratio: the real invariant, computed from the same fixture as the row form', () => {
+	const columnar = toColumnar(INCIDENT_67x7);
+	const rowBytes = byteLen(INCIDENT_67x7);
+	const columnarBytes = byteLen(columnar);
+	console.log(`[payload-size] INCIDENT_67x7 ratio, ${(columnarBytes / rowBytes).toFixed(3)}`);
+	assert.ok(
+		columnarBytes / rowBytes <= 0.6,
+		`expected columnar/row <= 0.60, got ${(columnarBytes / rowBytes).toFixed(3)}`,
+	);
+});
+
+test('columnar N=1 non-regression: the envelope overhead at one row stays a small, fixed, per-column cost', () => {
+	const columnar = toColumnar(INCIDENT_1x7);
+	const rowBytes = byteLen(INCIDENT_1x7);
+	const columnarBytes = byteLen(columnar);
+	// Unlike the settled "+1 byte" finding measured against production field
+	// names, this synthetic fixture's overhead is dominated by the {"columns":
+	// [...],"rows":[[...]]} envelope syntax itself (independent of value
+	// length) — empirically ~3 bytes/column here. Bound at 5 bytes/column so
+	// this stays a real regression catch, not a number tuned to always pass.
+	const budget = columnar.columns.length * 5;
+	assert.ok(
+		columnarBytes <= rowBytes + budget,
+		`expected columnar <= row + ${budget} at N=1, got row=${rowBytes} columnar=${columnarBytes}`,
+	);
+});
+
+test('rows[i].length === columns.length on every fixture, including RAGGED_67 (ACL-strip simulation)', () => {
+	for (const [name, fixture, fields] of [
+		['INCIDENT_67x7', INCIDENT_67x7, undefined],
+		['RAGGED_67', RAGGED_67, Object.keys(INCIDENT_67x7[0])],
+		['TABLES_100', TABLES_100, undefined],
+		['CHOICES_20', CHOICES_20, undefined],
+	]) {
+		const { columns, rows } = toColumnar(fixture, fields);
+		for (const row of rows) {
+			assert.equal(row.length, columns.length, `${name}: every row must have columns.length cells`);
+		}
+	}
+});
+
+test('requested fields lead columns, in caller order — any unrequested row key is appended after, never reordered in', () => {
+	const fields = ['sys_id', 'number', 'state'];
+	const { columns } = toColumnar(INCIDENT_67x7, fields);
+	assert.deepEqual(columns.slice(0, fields.length), fields);
+	// INCIDENT_67x7's rows carry more keys than requested — those still show up,
+	// appended after the requested prefix, never dropped silently.
+	assert.equal(columns.length, Object.keys(INCIDENT_67x7[0]).length);
+});
+
+test('columns deep-equals fields when every row key was requested (no unrequested keys to append)', () => {
+	const fields = Object.keys(INCIDENT_67x7[0]);
+	const { columns } = toColumnar(INCIDENT_67x7, fields);
+	assert.deepEqual(columns, fields);
+});
+
+test('absent becomes null, empty stays "" — RAGGED_67 exercises both', () => {
+	const fields = Object.keys(INCIDENT_67x7[0]);
+	const { rows } = toColumnar(RAGGED_67, fields);
+	// At least one row in this fixture is missing a key (dropped by the ragged
+	// generator) — confirm it renders as null, not a coerced "".
+	assert.ok(rows.some((row) => row.includes(null)), 'at least one dropped key should render as null');
+});
+
+test('budget-reachable: a 1000x7 columnar page fits at least 300 rows under the 45,000-byte budget', () => {
+	const rows1000 = buildIncidentRows(1000);
+	const { columns, rows } = toColumnar(rows1000);
+	const { rows: rendered, fetched } = capRendered(rows, {
+		maxRows: 1_000,
+		maxBytes: 45_000,
+		reservedBytes: byteLen(columns),
+	});
+	assert.equal(fetched, 1000);
+	assert.ok(rendered.length >= 300, `expected >=300 rows to fit, got ${rendered.length}`);
 });

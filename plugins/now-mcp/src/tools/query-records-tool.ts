@@ -8,6 +8,7 @@ import { type GraphqlService, GraphqlUnavailableError } from '../services/graphq
 import type { SchemaService } from '../services/schema-service.js';
 import type { TableService } from '../services/table-service.js';
 import { ServiceNowError } from '../types/errors.js';
+import { toColumnar } from '../utils/columnar.js';
 import { extractQueryFields } from '../utils/encoded-query.js';
 import { toolError } from '../utils/error-handler.js';
 import { zeroResultHints } from '../utils/failure-enrichment.js';
@@ -22,7 +23,7 @@ import { truncateRecordFields } from '../utils/value-truncation.js';
  * Render guardrail — independent of the requested `limit` (which the schema caps
  * at 10000). A single response that dumps thousands of rows floods the caller's
  * context, so we cap the rows *actually returned* to the client and also cap the
- * serialized JSON size. Whichever cap bites first truncates `records`; the
+ * serialized JSON size. Whichever cap bites first truncates `rows`; the
  * truncation is signaled explicitly (structuredContent.truncated + _meta) and in
  * a human note so the caller can narrow the query instead of silently losing rows.
  *
@@ -30,11 +31,12 @@ import { truncateRecordFields } from '../utils/value-truncation.js';
  * (Claude Code defaults to ~25k tokens), not just "reasonably small" — dense
  * content (JSON, stack traces, log lines) tokenizes at ~2-3 chars/token rather
  * than the ~4 chars/token of English prose, so a naive byte budget sized for
- * prose can still blow the host limit. 70,000 bytes leaves comfortable margin
- * even at the worst-case ratio.
+ * prose can still blow the host limit. Columnar removes the repeated-key
+ * overhead that made 70,000 bytes the safe number for the old row-object
+ * shape; 45,000 leaves the same comfortable margin for the leaner shape.
  */
 const MAX_RETURNED_ROWS = 1000;
-const MAX_SERIALIZED_BYTES = 70_000;
+const MAX_SERIALIZED_BYTES = 45_000;
 /** Per-field cap applied before the row/byte cap — one oversized field (e.g. a
  * syslog `message`) shouldn't be able to eat the whole byte budget by itself
  * and starve out every other row. */
@@ -245,23 +247,36 @@ export function createQueryRecordsTool(
 				const fetchedCount = records.length;
 				const totalMatching = totalCount;
 
-				// Per-field cap first: one oversized value (e.g. a syslog `message`)
-				// shouldn't consume the whole byte budget and starve out other rows.
+				// Per-field cap first, while records are still row objects (truncateValue
+				// operates on plain values, not columnar arrays): one oversized value
+				// (e.g. a syslog `message`) shouldn't consume the whole byte budget and
+				// starve out other rows.
 				const { records: fieldCappedRecords, truncated: fieldsTruncated } = truncateRecordFields(
 					records,
 					MAX_FIELD_VALUE_CHARS,
 				);
 
+				// Transpose to the columnar wire shape. Column order is constructed here
+				// (requested fields, caller order, then any unrequested key the
+				// transport returned anyway), never inherited from transport order.
+				const {
+					columns,
+					rows: transposedRows,
+					columnsNotReturned,
+				} = toColumnar(fieldCappedRecords, validated.fields);
+
 				// Render guardrail: cap the rows that actually reach the caller,
 				// independent of the requested `limit`, so a huge result can't flood the
-				// client context. `renderedRows` is what we serialize.
+				// client context. `reservedBytes` deducts the columns header (already
+				// paid for once) from the row budget. `renderedRows` is what we serialize.
 				const {
 					rows: renderedRows,
 					truncated: rowsTruncated,
 					truncationReason: rowsTruncationReason,
-				} = capRendered(fieldCappedRecords, {
+				} = capRendered(transposedRows, {
 					maxRows: MAX_RETURNED_ROWS,
 					maxBytes: MAX_SERIALIZED_BYTES,
+					reservedBytes: Buffer.byteLength(JSON.stringify(columns)),
 				});
 				const truncated = rowsTruncated || fieldsTruncated;
 				// A byte/row cap on the rows array takes priority over a cell-level cap
@@ -283,8 +298,9 @@ export function createQueryRecordsTool(
 				const response: Record<string, unknown> = {
 					success: true,
 					table: validated.tableName,
-					count: fetchedCount, // rows returned in this page
-					records: renderedRows,
+					count: renderedRows.length, // rows actually returned in this page
+					columns,
+					rows: renderedRows,
 					pagination: {
 						limit: validated.limit,
 						offset: validated.offset,
@@ -294,11 +310,14 @@ export function createQueryRecordsTool(
 					transport,
 				};
 
+				if (columnsNotReturned) {
+					response.columnsNotReturned = columnsNotReturned;
+				}
+
 				// Signal truncation explicitly so the caller can narrow the query
 				// instead of silently losing rows/data.
 				if (truncated) {
 					response.truncated = true;
-					response.returnedRows = renderedRows.length;
 					response.fetchedRows = fetchedCount;
 					if (truncationReason) response.truncationReason = truncationReason;
 				}
@@ -359,7 +378,6 @@ export function createQueryRecordsTool(
 					meta: {
 						instance: validated.instance || 'default',
 						durationMs,
-						transport,
 						...(source ? { source } : {}),
 						...(fallbackProfile ? { fallbackProfile } : {}),
 					},
