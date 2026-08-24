@@ -1,6 +1,6 @@
 ---
 name: sn-background-scripts
-description: Curated `sn_execute_background_script` templates for common ServiceNow instance-admin tasks (e.g. disabling MFA enforcement on a non-prod instance so now-mcp's Basic/OAuth auth can connect). Use when the user wants to run one of these named operations rather than write the script from scratch.
+description: Curated `sn_execute_background_script` templates for common ServiceNow instance-admin tasks (e.g. disabling MFA enforcement on a non-prod instance, or diagnosing why a user account can't authenticate — Active/Locked out/password/reset/API-access-role checks) so now-mcp's Basic/OAuth auth can connect. Use when the user wants to run one of these named operations rather than write the script from scratch.
 user-invocable: true
 disable-model-invocation: true
 allowed-tools: Read, mcp__plugin_now-mcp_now-mcp__sn_execute_background_script
@@ -18,6 +18,9 @@ file under `references/` so only the one you need gets read into context.
 - The user is blocked on a known instance-config problem this library already covers
   (e.g. now-mcp getting 401s because the instance enforces MFA and neither Basic auth
   nor OAuth password grant can satisfy an interactive MFA challenge).
+- now-mcp can't authenticate against an account and you need to know which
+  precondition is missing (Active, Locked out, password state, API access role,
+  MFA) before guessing at a fix.
 
 ## When NOT to use
 
@@ -31,6 +34,7 @@ file under `references/` so only the one you need gets read into context.
 | Task | File | Scope |
 |---|---|---|
 | Disable MFA enforcement instance-wide | `references/disable-mfa.js` | **Non-prod only** |
+| Diagnose why a user can't log in via basic auth (Active/Locked out/password/reset/API-access-role/MFA) | `references/check-login-eligibility.js` | Read-only — safe on any instance, including prod |
 
 ## How to run a template
 

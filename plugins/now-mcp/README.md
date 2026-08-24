@@ -128,6 +128,32 @@ Without a valid config the server still starts (degraded mode) and reports the
 reason (including the working directory and which sources it checked) on each
 call, so you can fix it without a crash loop.
 
+### Basic-auth prerequisites and 401 troubleshooting
+
+A 401 almost always traces to the ServiceNow **user record**, not the URL,
+username, or password being wrong. Before assuming the credentials are bad,
+confirm on the integration user's `sys_user` record:
+
+- **Active** = `true`
+- **Locked out** = `false`
+- Has a **valid local password** set (not blank, not an SSO-only account)
+- **Password needs reset** = `false` — some instances additionally enforce
+  `glide.authenticate.api.user.reset_password.mandatory`, which rejects an
+  admin-set password for API auth until the user logs in interactively once
+  and changes it themselves, even though the password is genuinely stored
+- One of:
+  - **Web service access only** = `true`, or
+  - has the **`snc_basic_auth_api_access`** role
+- **Multifactor authentication (MFA/2FA)** is not enforced for this user —
+  neither basic auth nor the OAuth `password` grant can satisfy an
+  interactive MFA challenge
+
+To check all of these for one account in a single read-only call, run the
+`check-login-eligibility.js` template from the
+[`sn-background-scripts`](skills/sn-background-scripts) skill. To turn off MFA
+enforcement instance-wide on a **non-prod** instance, that skill's
+`disable-mfa.js` template covers it.
+
 ---
 
 ## Tools
