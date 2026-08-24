@@ -628,19 +628,27 @@ export class SchemaService {
 				name: string;
 				label: string;
 				'super_class.name': string;
+				'sys_scope.scope': string;
 			}>;
 		}>('/api/now/table/sys_db_object', {
 			sysparm_query: query,
-			sysparm_fields: 'name,label,super_class.name',
+			sysparm_fields: 'name,label,super_class.name,sys_scope.scope',
 			sysparm_limit: limit,
 			sysparm_order_by: 'name',
 		});
 
-		const tables: TableListItem[] = response.result.map((table) => ({
-			name: table.name,
-			label: table.label,
-			extends: normalizeSNRef(table['super_class.name']),
-		}));
+		const tables: TableListItem[] = response.result.map((table) => {
+			const scopeName = normalizeSNRef(table['sys_scope.scope']);
+			return {
+				name: table.name,
+				label: table.label,
+				extends: normalizeSNRef(table['super_class.name']),
+				// "global" is the overwhelming majority (every OOB table); omit it so
+				// it doesn't repeat on every row — presence of `scope` already signals
+				// a scoped/custom app table.
+				scope: scopeName && scopeName !== 'global' ? scopeName : undefined,
+			};
+		});
 
 		// Cache the result
 		this.setCache(cacheKey, tables);

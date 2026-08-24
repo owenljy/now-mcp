@@ -20,7 +20,7 @@ export const LIST_TABLES_TOOL = {
 	description: `What: List tables in the instance, with optional name filtering.
 When to use: To discover which table to use. For a single table's fields use sn_get_table_schema.
 Preconditions: Read access to the dictionary.
-Produces: {columns, rows} — one row per table (name, label, parent table); cached ~15 min in memory, up to 24h on disk.
+Produces: {columns, rows} — one row per table (name, label, parent table, scope); cached ~15 min in memory, up to 24h on disk. scope is only present for scoped-app/custom tables (e.g. "x_acme_myapp") — absent means global/OOB.
 
 Filter matching: trailing * = starts-with (incident*), leading * = ends-with (*task), both/neither = substring (*task*, task).
 

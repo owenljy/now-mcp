@@ -548,6 +548,43 @@ test('resolveTableScope serves the second call from cache (client hit once)', as
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
 });
 
+function makeListTablesClient(rows) {
+  const state = { calls: 0, params: null };
+  return {
+    state,
+    async get(endpoint, params) {
+      state.calls++;
+      state.params = params;
+      assert.equal(endpoint, '/api/now/table/sys_db_object');
+      return { result: rows };
+    },
+  };
+}
+
+test('listTables requests sys_scope.scope and reports it for a scoped/custom table', async () => {
+  const client = makeListTablesClient([
+    { name: 'x_acme_widget', label: 'Widget', 'super_class.name': '', 'sys_scope.scope': 'x_acme_myapp' },
+  ]);
+  const svc = new SchemaService(makeManager(client));
+
+  const tables = await svc.listTables('x_acme_widget', 100, 'listscoped');
+  assert.equal(client.state.params.sysparm_fields, 'name,label,super_class.name,sys_scope.scope');
+  assert.equal(tables.length, 1);
+  assert.equal(tables[0].name, 'x_acme_widget');
+  assert.equal(tables[0].scope, 'x_acme_myapp');
+});
+
+test('listTables omits scope for a global/OOB table (including the literal "global" app)', async () => {
+  const client = makeListTablesClient([
+    { name: 'incident', label: 'Incident', 'super_class.name': 'task', 'sys_scope.scope': 'global' },
+  ]);
+  const svc = new SchemaService(makeManager(client));
+
+  const tables = await svc.listTables('incident', 100, 'listglobal');
+  assert.equal(tables[0].extends, 'task');
+  assert.equal(tables[0].scope, undefined);
+});
+
 /**
  * Stub returning dictionary rows in the OBJECT form: internal_type and reference
  * are reference columns on sys_dictionary, so without

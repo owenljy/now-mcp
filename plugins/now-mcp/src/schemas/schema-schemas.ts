@@ -99,6 +99,8 @@ export interface TableListItem {
 	label: string;
 	extends?: string;
 	numberOfRecords?: number;
+	/** Scoped-app name (e.g. `x_acme_myapp`); omitted for global/unscoped tables. */
+	scope?: string;
 }
 
 /**
