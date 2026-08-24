@@ -121,6 +121,47 @@ test('zeroResultHints suggest broadening with the query echoed', () => {
   assert.match(hints.join(' '), /priority=1\^state=99/);
 });
 
+test('the groupBy suggestion is withheld on a free-text field', () => {
+  // The regression this guards: a LIKE on an 8000-char message column used to
+  // be answered with groupBy on that column — one group per row, the exact
+  // call sn_aggregate_records blocks for sys_id.
+  const hints = zeroResultHints({
+    table: 'sn_aia_message',
+    query: 'user_messageLIKEasset security score',
+    fieldMeta: { user_message: { type: 'string', maxLength: 8000 } },
+  });
+  assert.ok(!hints.join(' ').includes('groupBy'), 'no groupBy suggestion on free text');
+  assert.match(hints.join(' '), /broaden/i, 'the generic recovery hint still fires');
+});
+
+test('the groupBy suggestion fires on a bounded field', () => {
+  const hints = zeroResultHints({
+    table: 'incident',
+    query: 'category=hardware',
+    fieldMeta: { category: { type: 'string', maxLength: 40 } },
+  });
+  assert.match(hints.join(' '), /groupBy:\["category"\]/);
+});
+
+test('the groupBy suggestion skips a free-text clause to reach a groupable one', () => {
+  const hints = zeroResultHints({
+    table: 'incident',
+    query: 'short_descriptionLIKEvpn^priority=1',
+    fieldMeta: {
+      short_description: { type: 'string', maxLength: 160 },
+      priority: { type: 'integer', maxLength: 40 },
+    },
+  });
+  const text = hints.join(' ');
+  assert.match(text, /groupBy:\["priority"\]/);
+  assert.ok(!text.includes('short_description"]'), 'the prose column is not the one suggested');
+});
+
+test('without fieldMeta the groupBy suggestion is withheld, not guessed', () => {
+  const hints = zeroResultHints({ table: 'incident', query: 'category=hardware' });
+  assert.ok(!hints.join(' ').includes('groupBy'));
+});
+
 test('renderHints formats or returns null', () => {
   assert.equal(renderHints([]), null);
   assert.match(renderHints(['a', 'b']), /Hints:\n- a\n- b/);

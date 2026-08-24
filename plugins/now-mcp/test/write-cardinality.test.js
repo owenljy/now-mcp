@@ -150,10 +150,15 @@ test('a write where nothing succeeded is an error result carrying recovery hints
 
 	assert.equal(res.isError, true, 'zero writes landed → the call failed');
 	// The hints a thrown single-record error would have carried are attached once,
-	// not repeated per record.
-	const hints = res.content.filter((c) => /^Hints:/.test(c.text));
-	assert.equal(hints.length, 1);
-	assert.match(hints[0].text, /Access denied on 'incident'/);
+	// not repeated per record — and they live in structuredContent, because a
+	// client that gets structuredContent never sees the text blocks.
+	const hints = res.structuredContent.hints;
+	assert.ok(Array.isArray(hints) && hints.length >= 1, 'hints ride in the body');
+	assert.match(hints.join(' '), /Access denied on 'incident'/);
+	assert.ok(
+		!res.content.some((c) => /^Hints:/.test(c.text)),
+		'and are not ALSO emitted as a text block, which would pay for them twice',
+	);
 });
 
 test('a partial failure is reported with counts rather than as an error', async () => {

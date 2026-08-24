@@ -20,7 +20,7 @@ import type { SchemaService } from '../services/schema-service.js';
 import type { TableService } from '../services/table-service.js';
 import { type EffectiveAccessReader, preflightEffectiveAccess } from '../utils/access-preflight.js';
 import { toolError } from '../utils/error-handler.js';
-import { renderHints, resultsFailureHints } from '../utils/failure-enrichment.js';
+import { resultsFailureHints } from '../utils/failure-enrichment.js';
 import { collectFieldNames, preflightFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
 import { writeResult } from '../utils/tool-response.js';
@@ -134,10 +134,11 @@ export function createCreateRecordsTool(
 				);
 
 				// A batch reports failures inside results[] rather than throwing, so the
-				// recovery guidance a thrown error would have carried is attached here.
-				const hints = renderHints(
-					resultsFailureHints(result.results, { table: tableName, operation: 'create' }),
-				);
+				// recovery guidance a thrown error would have carried rides in the body.
+				const hints = resultsFailureHints(result.results, {
+					table: tableName,
+					operation: 'create',
+				});
 
 				return writeResult(
 					{
@@ -150,9 +151,9 @@ export function createCreateRecordsTool(
 							failureCount: result.failureCount,
 						},
 						results: result.results,
+						...(hints.length > 0 ? { hints } : {}),
 					},
 					`create ${tableName}: ${result.successCount} ok, ${result.failureCount} failed`,
-					{ extraText: hints ? [hints] : [] },
 				);
 			} catch (error) {
 				logger.error('Error creating record(s)', error);

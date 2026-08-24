@@ -355,11 +355,22 @@ export function createQueryRecordsTool(
 					response.fieldsTruncated = true;
 				}
 
-				// Enrich an empty result set with recovery hints.
+				// Enrich an empty result set with recovery hints. The dictionary
+				// type/length of each queried field decides whether a groupBy
+				// suggestion is worth making — the chain is already cached from field
+				// validation, so this is a map lookup, not a round-trip.
 				if (records.length === 0) {
+					const fieldMeta = validated.query
+						? await schemaService.fieldMetaAmong(
+								validated.tableName,
+								extractQueryFields(validated.query),
+								validated.instance,
+							)
+						: {};
 					response.hints = zeroResultHints({
 						table: validated.tableName,
 						query: validated.query,
+						fieldMeta,
 					});
 				} else {
 					// Cost hints only make sense on a successful, non-empty result — a
@@ -399,30 +410,32 @@ export function createQueryRecordsTool(
 					records.length === 0 ? ' — see hints' : ''
 				}`;
 
-				const extraTextParts: string[] = [];
+				// Truncation guidance rides in the body, next to the flags it explains.
+				// `warnings` is NOT repeated here — it already has its own key on the
+				// response, and duplicating it would pay for the same sentence twice.
+				const truncationHints: string[] = [];
 				if (rowsTruncated) {
 					const reasonNote =
 						rowsTruncationReason === 'row_count'
 							? `row-count cap of ${MAX_RETURNED_ROWS} rows`
 							: `byte cap of ${MAX_SERIALIZED_BYTES} bytes`;
-					extraTextParts.push(
-						`Note: the result was truncated — showing ${renderedRows.length} of ${fetchedCount} fetched rows ` +
+					truncationHints.push(
+						`The result was truncated — showing ${renderedRows.length} of ${fetchedCount} fetched rows ` +
 							`(hit the ${reasonNote}). ` +
 							`Narrow the query to see the rest: add filters, select fewer fields, or use sn_aggregate_records for counts/group-by.`,
 					);
 				}
 				if (fieldsTruncated) {
-					extraTextParts.push(
-						`Note: one or more field values exceeded ${MAX_FIELD_VALUE_CHARS} chars and were truncated ` +
+					truncationHints.push(
+						`One or more field values exceeded ${MAX_FIELD_VALUE_CHARS} chars and were truncated ` +
 							`(marked "…[truncated N chars]"). Select fewer/narrower fields, or fetch the full value for a ` +
 							`specific record another way (e.g. a targeted background script) if you need it in full.`,
 					);
 				}
-				// Journal/expand warnings are surfaced as their own text block too: a
-				// caller that reads only the summary would otherwise act on an empty
-				// journal value as if it meant "no comments".
-				extraTextParts.push(...warnings);
-				const extraText = extraTextParts.length > 0 ? extraTextParts : undefined;
+				if (truncationHints.length > 0) {
+					const existing = Array.isArray(response.hints) ? (response.hints as string[]) : [];
+					response.hints = [...truncationHints, ...existing];
+				}
 
 				// _meta carries only genuinely result-level fields (WS-B §4.2); counts and
 				// truncation flags already live in the body, so they are not duplicated here.
@@ -433,7 +446,6 @@ export function createQueryRecordsTool(
 						...(source ? { source } : {}),
 						...(fallbackProfile ? { fallbackProfile } : {}),
 					},
-					extraText,
 				});
 			} catch (error) {
 				logger.error('Error querying records', error);

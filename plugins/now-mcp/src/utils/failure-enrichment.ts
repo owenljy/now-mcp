@@ -8,6 +8,7 @@
  */
 
 import { extractQueryFields } from './encoded-query.js';
+import { type GroupabilityMeta, isGroupableField } from './groupability.js';
 
 export interface FailureContext {
 	table?: string;
@@ -27,6 +28,12 @@ export interface FailureContext {
 	 * role/ACL evaluation happens, independent of the caller's roles.
 	 * 'unknown' when the probe wasn't run or couldn't determine an answer. */
 	wsAccess?: 'disabled' | 'enabled' | 'unknown';
+	/**
+	 * Dictionary type/length for the fields named in `query`, when the caller
+	 * has the schema in hand. Used ONLY to decide whether a groupBy suggestion
+	 * would help — omit it and that suggestion is simply withheld, never guessed.
+	 */
+	fieldMeta?: Record<string, GroupabilityMeta>;
 }
 
 export type FailureType =
@@ -185,11 +192,17 @@ export function zeroResultHints(ctx: FailureContext = {}): string[] {
 	hints.push(
 		'Confirm field values with sn_get_choice_list, or check the table with sn_get_table_schema.',
 	);
-	const queryFields = ctx.query ? extractQueryFields(ctx.query) : [];
-	if (queryFields.length > 0) {
-		const field = queryFields[0];
+	// Suggest groupBy only for a field whose values form a bounded set. The
+	// first query field is NOT a safe default: on a free-text column
+	// (user_message, 8000 chars) groupBy returns one group per row — the exact
+	// call sn_aggregate_records blocks for sys_id. Without fieldMeta the type is
+	// unknown, so the suggestion is withheld rather than guessed.
+	const groupable = (ctx.query ? extractQueryFields(ctx.query) : []).find((f) =>
+		isGroupableField(f, ctx.fieldMeta?.[f]),
+	);
+	if (groupable) {
 		hints.push(
-			`To see which values actually exist for ${field}, call sn_aggregate_records {groupBy:["${field}"],count:true} — one call, and it shows real values rather than configured choices.`,
+			`To see which values actually exist for ${groupable}, call sn_aggregate_records {groupBy:["${groupable}"],count:true} — one call, and it shows real values rather than configured choices.`,
 		);
 	}
 	return hints;

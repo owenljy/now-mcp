@@ -31,25 +31,24 @@ interface StructuredToolResult {
  * Build a success result whose full data lives ONLY in `structuredContent`,
  * while the text block carries a short human summary.
  *
- * Why: MCP delivers both `content.text` and `structuredContent` to the model, so
- * serializing the whole payload into both (the old `toolText(response)` +
- * `structuredContent: response` pattern) paid ~2× the tokens per call. The model
- * consumes the machine-readable data from `structuredContent` (verified: a
- * structuredContent-only field is visible to the caller), so the text only needs
- * to be a glanceable recap — counts + identity — not the data itself.
+ * NOTHING LOAD-BEARING MAY LIVE IN THE TEXT BLOCK. Measured against Claude
+ * Code: when a result carries `structuredContent`, the client delivers that
+ * alone and the text blocks never reach the model — the same call with no
+ * `structuredContent` (e.g. the CI write-routing refusal) does deliver its
+ * text. So a truncation note or a recovery hint emitted as a text block is
+ * simply lost, and silently: a truncated result reads as a complete one.
  *
- * `summary` should be a single short line (e.g. "42 rows on incident").
- * `extraText` appends further text blocks (e.g. a truncation note) after it.
+ * That is why this takes no `extraText`. Every warning, hint, and truncation
+ * note belongs on a key of `structuredContent` (`hints`, `warnings`,
+ * `truncated`, …). `summary` is a glanceable recap for a human reading the
+ * transcript — counts and identity, never information found nowhere else.
  */
 export function toolResult(
 	structuredContent: Record<string, unknown>,
 	summary: string,
-	opts?: { meta?: Record<string, unknown>; extraText?: string[] },
+	opts?: { meta?: Record<string, unknown> },
 ): StructuredToolResult {
 	const content: { type: 'text'; text: string }[] = [{ type: 'text', text: summary }];
-	for (const t of opts?.extraText ?? []) {
-		content.push({ type: 'text', text: t });
-	}
 	return opts?.meta
 		? { content, structuredContent, _meta: opts.meta }
 		: { content, structuredContent };
@@ -70,8 +69,7 @@ export function writeResult(
 		summary: { total: number; successCount: number; failureCount: number };
 	},
 	summary: string,
-	opts?: { extraText?: string[] },
 ): StructuredToolResult & { isError?: true } {
-	const base = toolResult(structuredContent, summary, opts);
+	const base = toolResult(structuredContent, summary);
 	return structuredContent.summary.successCount === 0 ? { ...base, isError: true } : base;
 }

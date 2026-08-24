@@ -16,7 +16,7 @@ import type { TableService } from '../services/table-service.js';
 import { type EffectiveAccessReader, preflightEffectiveAccess } from '../utils/access-preflight.js';
 import { elicitConfirmation, toolAborted } from '../utils/elicitation.js';
 import { toolError } from '../utils/error-handler.js';
-import { renderHints, resultsFailureHints } from '../utils/failure-enrichment.js';
+import { resultsFailureHints } from '../utils/failure-enrichment.js';
 import { collectFieldNames, preflightFieldValidation } from '../utils/field-validation.js';
 import { logger } from '../utils/logger.js';
 import { writeResult } from '../utils/tool-response.js';
@@ -186,10 +186,11 @@ export function createUpdateRecordsTool(
 				);
 
 				// A batch reports failures inside results[] rather than throwing, so the
-				// recovery guidance a thrown error would have carried is attached here.
-				const hints = renderHints(
-					resultsFailureHints(result.results, { table: tableName, operation: 'update' }),
-				);
+				// recovery guidance a thrown error would have carried rides in the body.
+				const hints = resultsFailureHints(result.results, {
+					table: tableName,
+					operation: 'update',
+				});
 				// A write that reported success but did not persist is a different problem
 				// from a rejected write, and it has its own follow-up tool.
 				const notPersisted = result.results.some((r) => r?.mismatches?.length);
@@ -207,9 +208,9 @@ export function createUpdateRecordsTool(
 						},
 						results: result.results,
 						...(notPersisted ? NOT_PERSISTED_DIAGNOSIS : {}),
+						...(hints.length > 0 ? { hints } : {}),
 					},
 					`update ${tableName}: ${result.successCount} ok, ${result.failureCount} failed`,
-					{ extraText: hints ? [hints] : [] },
 				);
 			} catch (error) {
 				logger.error('Error updating record(s)', error);

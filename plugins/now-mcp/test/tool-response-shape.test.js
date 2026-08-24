@@ -22,13 +22,13 @@ test('toolResult keeps data in structuredContent and text as a short summary', (
 	assert.ok(!r.content[0].text.includes('records'), 'payload is not duplicated into text');
 });
 
-test('toolResult appends extraText blocks and attaches _meta', () => {
-	const r = toolResult({ ok: true }, 'summary', {
-		meta: { instance: 'dev', durationMs: 5 },
-		extraText: ['note: truncated'],
-	});
-	assert.equal(r.content.length, 2);
-	assert.equal(r.content[1].text, 'note: truncated');
+test('toolResult attaches _meta and emits exactly ONE text block', () => {
+	// One block, always: a client that receives structuredContent drops the text
+	// entirely, so anything load-bearing must be on a structuredContent key. The
+	// single block is a human-readable recap of the transcript, nothing more.
+	const r = toolResult({ ok: true }, 'summary', { meta: { instance: 'dev', durationMs: 5 } });
+	assert.equal(r.content.length, 1);
+	assert.equal(r.content[0].text, 'summary');
 	assert.deepEqual(r._meta, { instance: 'dev', durationMs: 5 });
 });
 
@@ -40,6 +40,14 @@ function fakeSchemaService(fields) {
 		async getTableSchema() {
 			return { exists: true, name: 'incident', label: 'Incident', extends: 'task', fields };
 		},
+		// Mirrors the real resolver's precedence: dictionary flag, then the
+		// fallback-to-`name` convention, then nothing.
+		async resolveDisplayField() {
+			const flagged = fields.find((f) => f.display);
+			if (flagged) return { field: flagged.name, source: 'dictionary' };
+			if (fields.some((f) => f.name === 'name')) return { field: 'name', source: 'name_convention' };
+			return undefined;
+		},
 	};
 }
 
@@ -50,6 +58,113 @@ function fakeTableServiceForCreate(created) {
 		},
 	};
 }
+
+test('get_table_schema reports the display column, even when it is a sys_ field', async () => {
+	// The failure this prevents: a caller assumes `title` holds the label,
+	// reads a junk value out of it, and reports it to the user as content.
+	const fields = [
+		{ name: 'title', label: 'Title', type: 'string', mandatory: false, readOnly: false },
+		{ name: 'label', label: 'Label', type: 'string', mandatory: false, readOnly: false, display: true },
+	];
+	const tool = createGetTableSchemaTool(fakeSchemaService(fields));
+	const out = (await tool.handler({ tableName: 'sys_cs_conversation' })).structuredContent;
+	assert.equal(out.displayField, 'label');
+	assert.equal(out.displayFieldSource, 'dictionary');
+});
+
+test('get_table_schema marks a name-convention display field as inferred, not authoritative', async () => {
+	const fields = [
+		{ name: 'name', label: 'Name', type: 'string', mandatory: false, readOnly: false },
+		{ name: 'other', label: 'Other', type: 'string', mandatory: false, readOnly: false },
+	];
+	const out = (await createGetTableSchemaTool(fakeSchemaService(fields)).handler({
+		tableName: 'sys_user_group',
+	})).structuredContent;
+	assert.equal(out.displayField, 'name');
+	assert.equal(out.displayFieldSource, 'name_convention');
+});
+
+test('get_table_schema omits displayField when no column is flagged', async () => {
+	const fields = [{ name: 'a', label: 'A', type: 'string', mandatory: false, readOnly: false }];
+	const out = (await createGetTableSchemaTool(fakeSchemaService(fields)).handler({
+		tableName: 'incident',
+	})).structuredContent;
+	assert.ok(!('displayField' in out));
+	assert.ok(!('displayFieldSource' in out));
+});
+
+test('get_table_schema hides platform bookkeeping by default and names what it hid', async () => {
+	const fields = [
+		{ name: 'short_description', label: 'Short description', type: 'string', mandatory: false, readOnly: false },
+		{ name: 'sys_mod_count', label: 'Updates', type: 'integer', mandatory: false, readOnly: true },
+		{ name: 'sys_domain_path', label: 'Domain Path', type: 'domain_path', mandatory: false, readOnly: false },
+		// Kept: callers legitimately time-bound on these.
+		{ name: 'sys_created_on', label: 'Created', type: 'glide_date_time', mandatory: false, readOnly: true },
+		{ name: 'sys_id', label: 'Sys ID', type: 'GUID', mandatory: false, readOnly: true },
+	];
+	const out = (await createGetTableSchemaTool(fakeSchemaService(fields)).handler({
+		tableName: 'incident',
+	})).structuredContent;
+
+	const names = out.rows.map((r) => r[0]);
+	assert.deepEqual(names, ['short_description', 'sys_created_on', 'sys_id']);
+	assert.deepEqual(out.systemFieldsHidden, ['sys_mod_count', 'sys_domain_path']);
+	// fieldCount stays the table's real width — a filtered view must not read
+	// as a narrow table.
+	assert.equal(out.fieldCount, 5);
+});
+
+test('get_table_schema returns every field when includeSystemFields is set', async () => {
+	const fields = [
+		{ name: 'a', label: 'A', type: 'string', mandatory: false, readOnly: false },
+		{ name: 'sys_mod_count', label: 'Updates', type: 'integer', mandatory: false, readOnly: true },
+	];
+	const out = (await createGetTableSchemaTool(fakeSchemaService(fields)).handler({
+		tableName: 'incident',
+		includeSystemFields: true,
+	})).structuredContent;
+	assert.deepEqual(out.rows.map((r) => r[0]), ['a', 'sys_mod_count']);
+	assert.ok(!('systemFieldsHidden' in out));
+});
+
+test('get_table_schema never hides the display column, even if it is on the system list', async () => {
+	const fields = [
+		{ name: 'sys_tags', label: 'Tags', type: 'string', mandatory: false, readOnly: false, display: true },
+		{ name: 'sys_mod_count', label: 'Updates', type: 'integer', mandatory: false, readOnly: true },
+	];
+	const out = (await createGetTableSchemaTool(fakeSchemaService(fields)).handler({
+		tableName: 'weird',
+	})).structuredContent;
+	assert.deepEqual(out.rows.map((r) => r[0]), ['sys_tags']);
+	assert.deepEqual(out.systemFieldsHidden, ['sys_mod_count']);
+});
+
+test('get_table_schema match filters on name and label, and says so when nothing matches', async () => {
+	const fields = [
+		{ name: 'assigned_to', label: 'Assigned to', type: 'reference', mandatory: false, readOnly: false },
+		{ name: 'assignment_group', label: 'Assignment group', type: 'reference', mandatory: false, readOnly: false },
+		{ name: 'u_owner', label: 'Assignee (legacy)', type: 'string', mandatory: false, readOnly: false },
+		{ name: 'priority', label: 'Priority', type: 'integer', mandatory: false, readOnly: false },
+	];
+	const svc = fakeSchemaService(fields);
+
+	const hit = (await createGetTableSchemaTool(svc).handler({
+		tableName: 'incident',
+		match: 'ASSIGN',
+	})).structuredContent;
+	// u_owner matches on LABEL only — that is the point of searching both.
+	assert.deepEqual(hit.rows.map((r) => r[0]), ['assigned_to', 'assignment_group', 'u_owner']);
+	assert.equal(hit.matchedCount, 3);
+	assert.equal(hit.fieldCount, 4);
+
+	const miss = (await createGetTableSchemaTool(svc).handler({
+		tableName: 'incident',
+		match: 'zzz',
+	})).structuredContent;
+	assert.equal(miss.rows.length, 0);
+	assert.equal(miss.matchedCount, 0);
+	assert.match(miss.hints.join(' '), /Drop match/);
+});
 
 test('get_table_schema materializes fixed columns with explicit booleans, never omitted', async () => {
 	const fields = [

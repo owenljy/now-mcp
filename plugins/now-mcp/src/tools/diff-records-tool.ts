@@ -84,20 +84,19 @@ export function createDiffRecordsTool(tableService: TableService) {
 					response.valuesTruncated = true;
 				}
 
+				if (valuesTruncated) {
+					response.hints = [
+						`One or more diffed values exceeded ${MAX_DIFF_VALUE_CHARS} chars and were truncated ` +
+							`(marked "…[truncated N chars]"). Use the fields[] argument to restrict the comparison, or ` +
+							`fetch the full value directly if you need it in full.`,
+					];
+				}
+
 				return toolResult(
 					response,
 					`${Object.keys(diffs).length} field(s) differ of ${keys.size} on ${validated.tableName}${
 						valuesTruncated ? ' (some values truncated)' : ''
 					}`,
-					valuesTruncated
-						? {
-								extraText: [
-									`Note: one or more diffed values exceeded ${MAX_DIFF_VALUE_CHARS} chars and were truncated ` +
-										`(marked "…[truncated N chars]"). Use the fields[] argument to restrict the comparison, or ` +
-										`fetch the full value directly if you need it in full.`,
-								],
-							}
-						: undefined,
 				);
 			} catch (error) {
 				logger.error('Error diffing records', error);

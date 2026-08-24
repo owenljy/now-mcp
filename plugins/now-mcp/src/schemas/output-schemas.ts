@@ -107,6 +107,7 @@ export const AggregateRecordsOutputSchema = z.object({
 	fetchedGroups: z.number().optional(),
 	// Present when topGroups sliced the result — the true pre-slice group count.
 	totalGroups: z.number().optional(),
+	hints: z.array(z.string()).optional(),
 });
 
 /**
@@ -121,6 +122,34 @@ export const AggregateRecordsOutputSchema = z.object({
  * reported as a FAILURE carrying the fields that disagreed, never as a success
  * with a flag on it.
  */
+/**
+ * The delete tool's cascade pre-flight report. Present only on a refused
+ * delete, where it IS the payload — the caller needs the per-column breakdown
+ * as data to decide whether to acknowledge.
+ */
+export const CascadeImpactSchema = z.object({
+	scanned: z.boolean(),
+	skipReason: z.string().optional(),
+	/** Target table + ancestors; a column declared against a parent holds the
+	 * child's sys_ids too. */
+	chain: z.array(z.string()),
+	/** Reference columns carrying a live cascade rule, before the probe cap. */
+	candidates: z.number(),
+	probed: z.number(),
+	columns: z
+		.array(z.string())
+		.describe("Fixed order: ['table','field','count','cascadeRule','onDelete']."),
+	rows: z.array(z.array(z.unknown())),
+	/** "table.field" whose rule makes the platform refuse the delete outright —
+	 * acknowledgeCascade does not get past these. */
+	blockedBy: z.array(z.string()),
+	cascadeRowCount: z.number(),
+	clearedRowCount: z.number(),
+	notProbed: z.array(z.string()).optional(),
+	notProbedCount: z.number().optional(),
+	unreadable: z.array(z.string()).optional(),
+});
+
 export const WriteRecordsOutputSchema = z.object({
 	success: z.boolean(),
 	table: z.string(),
@@ -138,6 +167,14 @@ export const WriteRecordsOutputSchema = z.object({
 	likelyCauses: z.array(z.string()).optional(),
 	recommendedTool: z.string().optional(),
 	warning: z.string().optional(),
+	/** Delete only. False when the cascade pre-flight refused the call before
+	 * touching anything — distinguishes "nothing was attempted" from a zero-row
+	 * summary that means "attempted and all failed". */
+	deleted: z.boolean().optional(),
+	reason: z.string().optional(),
+	message: z.string().optional(),
+	cascadeImpact: CascadeImpactSchema.optional(),
+	hints: z.array(z.string()).optional(),
 });
 
 // ServiceNow reference fields can arrive as a plain string or as a
@@ -174,6 +211,22 @@ export const GetTableSchemaOutputSchema = z.object({
 			"Fixed order: ['name','type','mandatory','readOnly','maxLength','reference']. mandatory/readOnly are always explicit booleans (never null); maxLength/reference are null when not applicable.",
 		),
 	rows: z.array(z.array(z.unknown())),
+	/** The column the UI shows wherever this record is referenced, resolved
+	 * through the inheritance chain. Absent when the table has neither a
+	 * sys_dictionary.display flag nor a `name` column. */
+	displayField: z.string().optional(),
+	/** Whether displayField came from a real dictionary flag or the platform's
+	 * fallback-to-`name` convention. */
+	displayFieldSource: z.enum(['dictionary', 'name_convention']).optional(),
+	/** Platform bookkeeping columns omitted from `rows`; pass
+	 * includeSystemFields:true to get them. Named, not just counted, so nothing
+	 * the caller might need is silently invisible. */
+	systemFieldsHidden: z.array(z.string()).optional(),
+	/** Echo of the caller's `match` filter, with how many fields survived it.
+	 * `fieldCount` remains the table's real width. */
+	match: z.string().optional(),
+	matchedCount: z.number().optional(),
+	hints: z.array(z.string()).optional(),
 	// True when a very wide table's fields were capped at a row boundary.
 	fieldsTruncated: z.boolean().optional(),
 	instance: z.string(),

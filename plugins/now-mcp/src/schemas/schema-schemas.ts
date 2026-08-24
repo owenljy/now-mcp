@@ -15,6 +15,18 @@ export const GetTableSchemaSchema = z.object({
 		.boolean()
 		.default(false)
 		.describe('Include fields from parent tables (extended tables)'),
+	includeSystemFields: z
+		.boolean()
+		.default(false)
+		.describe(
+			'Include platform bookkeeping columns (sys_mod_count, sys_domain, sys_domain_path, sys_tags, and the sys_metadata plumbing under includeExtended). Off by default; the response always reports how many were hidden and names them.',
+		),
+	match: z
+		.string()
+		.optional()
+		.describe(
+			'Case-insensitive substring filter over field name AND label — e.g. "assign" finds assigned_to and assignment_group. Applied after the system-field filter; fieldCount still reports the table total.',
+		),
 });
 
 export type GetTableSchemaInput = z.infer<typeof GetTableSchemaSchema>;
@@ -61,6 +73,9 @@ export interface FieldMetadata {
 	readOnly: boolean;
 	maxLength?: number;
 	reference?: string; // Referenced table name
+	/** sys_dictionary.display — the column whose value the UI shows for this
+	 * record. At most one per table hierarchy; undefined on every other field. */
+	display?: boolean;
 	choices?: Array<{ label: string; value: string }>;
 }
 

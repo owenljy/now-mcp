@@ -217,6 +217,12 @@ export const DeleteRecordsSchema = z.object({
 		.describe(
 			'Read each record back after deleting to confirm it is gone (default true). Batched into one extra request, so the cost does not scale with the number of records.',
 		),
+	acknowledgeCascade: z
+		.boolean()
+		.default(false)
+		.describe(
+			'Proceed even though other rows point at these records. Leave false (default) and the tool first counts what a delete would destroy, refusing with the breakdown if it would cascade-delete rows or be refused by the platform. Set true only after reading that breakdown — it SKIPS the check entirely, so it also serves as the escape hatch when the scan is not wanted.',
+		),
 	continueOnError: continueOnErrorField,
 });
 

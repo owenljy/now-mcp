@@ -9,6 +9,7 @@ import type { TableService } from '../services/table-service.js';
 import { extractQueryFields } from '../utils/encoded-query.js';
 import { toolError } from '../utils/error-handler.js';
 import { preflightReadFieldValidation } from '../utils/field-validation.js';
+import { UNIQUE_COLUMNS } from '../utils/groupability.js';
 import { logger } from '../utils/logger.js';
 import { capRendered } from '../utils/render-cap.js';
 import { toolResult } from '../utils/tool-response.js';
@@ -21,9 +22,6 @@ import { toolResult } from '../utils/tool-response.js';
  */
 const MAX_GROUP_ROWS = 2000;
 const MAX_SERIALIZED_BYTES = 70_000;
-
-/** One group per row is strictly worse than the row query it replaced. */
-const UNIQUE_COLUMNS = new Set(['sys_id', 'number', 'sys_created_on', 'sys_updated_on']);
 
 /**
  * having/orderBy are calibrated, not maximal: ServiceNow's full sysparm_having
@@ -263,16 +261,14 @@ export function createAggregateRecordsTool(
 					: ungroupedCount !== undefined
 						? `count=${ungroupedCount} on ${v.tableName}`
 						: `aggregate on ${v.tableName}`;
-				return toolResult(response, summary, {
-					meta,
-					extraText: truncated
-						? [
-								`Note: the result was truncated — showing ${returnedGroupCount} of ${fetchedGroups} groups ` +
-									`(render cap ${MAX_GROUP_ROWS} groups / ${MAX_SERIALIZED_BYTES} bytes). ` +
-									`Narrow the query, add a having filter, or group by a lower-cardinality field to see the rest.`,
-							]
-						: undefined,
-				});
+				if (truncated) {
+					response.hints = [
+						`The result was truncated — showing ${returnedGroupCount} of ${fetchedGroups} groups ` +
+							`(render cap ${MAX_GROUP_ROWS} groups / ${MAX_SERIALIZED_BYTES} bytes). ` +
+							`Narrow the query, add a having filter, or group by a lower-cardinality field to see the rest.`,
+					];
+				}
+				return toolResult(response, summary, { meta });
 			} catch (error) {
 				logger.error('Error aggregating records', error);
 				return toolError(error, { table: tableName, operation: 'aggregate' });

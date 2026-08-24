@@ -37,6 +37,7 @@ function makeStubClient() {
               read_only: 'false',
               max_length: '160',
               reference: '',
+              display: 'true',
             },
             {
               element: 'caller_id',
@@ -46,6 +47,7 @@ function makeStubClient() {
               read_only: 'false',
               max_length: '32',
               reference: 'sys_user',
+              display: 'false',
             },
           ],
         };
@@ -92,6 +94,233 @@ test('getTableSchema parses sys_dictionary rows into field metadata', async () =
 
   assert.equal(byName.caller_id.mandatory, false);
   assert.equal(byName.caller_id.reference, 'sys_user');
+});
+
+test('the display column is parsed off sys_dictionary and requested in the projection', async () => {
+  const client = makeStubClient();
+  const svc = new SchemaService(makeManager(client));
+
+  const meta = await svc.getTableSchema('incident', false, 'displaytest');
+
+  const byName = Object.fromEntries(meta.fields.map((f) => [f.name, f]));
+  assert.equal(byName.short_description.display, true);
+  // Absent, not false — a per-field `false` on every non-display column would
+  // be pure payload.
+  assert.equal(byName.caller_id.display, undefined);
+
+  const dict = client.state.calls.find((c) => c.endpoint === '/api/now/table/sys_dictionary');
+  assert.match(dict.params.sysparm_fields, /(^|,)display(,|$)/);
+});
+
+test('includeExtended actually returns inherited fields, not just the local dictionary', async () => {
+  // The regression: includeExtended used to only drop the `collection` filter
+  // on a `name=<table>` query. sys_dictionary is keyed by the table a column is
+  // DEFINED on, so that query can never return `number` for incident — the flag
+  // silently did nothing.
+  const state = { dictionaryQueries: [] };
+  const client = {
+    async get(endpoint, params) {
+      if (endpoint === '/api/now/table/sys_dictionary') {
+        state.dictionaryQueries.push(params.sysparm_query);
+        const row = (element, display = 'false') => ({
+          element,
+          column_label: element,
+          internal_type: 'string',
+          mandatory: 'false',
+          read_only: 'false',
+          max_length: '40',
+          reference: '',
+          display,
+        });
+        return params.sysparm_query.startsWith('name=incident')
+          ? { result: [row('short_description')] }
+          : { result: [row('number', 'true'), row('short_description')] };
+      }
+      if (endpoint === '/api/now/table/sys_db_object') {
+        return params.sysparm_query === 'name=incident'
+          ? { result: [{ name: 'incident', label: 'Incident', 'super_class.name': 'task' }] }
+          : { result: [{ name: 'task', label: 'Task', 'super_class.name': '' }] };
+      }
+      return { result: [] };
+    },
+  };
+  const svc = new SchemaService(makeManager(client));
+
+  const local = await svc.getTableSchema('incident', false, 'inherit');
+  assert.deepEqual(local.fields.map((f) => f.name), ['short_description']);
+
+  const extended = await svc.getTableSchema('incident', true, 'inherit');
+  assert.deepEqual(extended.fields.map((f) => f.name), ['short_description', 'number']);
+  // Identity stays the child's — only the field list widens.
+  assert.equal(extended.name, 'incident');
+  assert.equal(extended.extends, 'task');
+  // A child's override of an inherited column wins; the parent's duplicate
+  // short_description is not appended twice.
+  assert.equal(extended.fields.filter((f) => f.name === 'short_description').length, 1);
+
+  // Every dictionary read excludes the collection row, which carries an empty
+  // element and would otherwise surface as a nameless field.
+  assert.ok(state.dictionaryQueries.every((q) => q.includes('internal_type!=collection')));
+});
+
+test('includeExtended on a root table costs no extra dictionary read', async () => {
+  // No parent to walk, so the chain walk must short-circuit rather than
+  // re-collecting the same table.
+  const state = { dictionaryCalls: 0 };
+  const client = {
+    async get(endpoint) {
+      if (endpoint === '/api/now/table/sys_dictionary') {
+        state.dictionaryCalls++;
+        return { result: [] };
+      }
+      return { result: [{ name: 'task', label: 'Task', 'super_class.name': '' }] };
+    },
+  };
+  const svc = new SchemaService(makeManager(client));
+  await svc.getTableSchema('task', true, 'rootext');
+  assert.equal(state.dictionaryCalls, 1);
+});
+
+test('resolveDisplayField finds a flag defined on a PARENT table', async () => {
+  // The real shape: incident's display column is `number`, flagged on task.
+  // Reading only incident's own dictionary (includeExtended:false) finds
+  // nothing, which is why the resolver walks the chain.
+  const client = {
+    async get(endpoint, params) {
+      if (endpoint === '/api/now/table/sys_dictionary') {
+        return params.sysparm_query.startsWith('name=incident')
+          ? {
+              result: [
+                {
+                  element: 'short_description',
+                  column_label: 'Short description',
+                  internal_type: 'string',
+                  mandatory: 'false',
+                  read_only: 'false',
+                  max_length: '160',
+                  reference: '',
+                  display: 'false',
+                },
+              ],
+            }
+          : {
+              result: [
+                {
+                  element: 'number',
+                  column_label: 'Number',
+                  internal_type: 'string',
+                  mandatory: 'false',
+                  read_only: 'false',
+                  max_length: '40',
+                  reference: '',
+                  display: 'true',
+                },
+              ],
+            };
+      }
+      if (endpoint === '/api/now/table/sys_db_object') {
+        return params.sysparm_query === 'name=incident'
+          ? { result: [{ name: 'incident', label: 'Incident', 'super_class.name': 'task' }] }
+          : { result: [{ name: 'task', label: 'Task', 'super_class.name': '' }] };
+      }
+      return { result: [] };
+    },
+  };
+  const svc = new SchemaService(makeManager(client));
+
+  assert.deepEqual(await svc.resolveDisplayField('incident', 'chainwalk'), {
+    field: 'number',
+    source: 'dictionary',
+  });
+});
+
+test('resolveDisplayField falls back to a name column and labels it as inferred', async () => {
+  const client = {
+    async get(endpoint) {
+      if (endpoint === '/api/now/table/sys_dictionary') {
+        return {
+          result: [
+            {
+              element: 'name',
+              column_label: 'Name',
+              internal_type: 'string',
+              mandatory: 'false',
+              read_only: 'false',
+              max_length: '80',
+              reference: '',
+              display: 'false',
+            },
+          ],
+        };
+      }
+      if (endpoint === '/api/now/table/sys_db_object') {
+        return { result: [{ name: 'x', label: 'X', 'super_class.name': '' }] };
+      }
+      return { result: [] };
+    },
+  };
+  const svc = new SchemaService(makeManager(client));
+  assert.deepEqual(await svc.resolveDisplayField('x', 'namefallback'), {
+    field: 'name',
+    source: 'name_convention',
+  });
+});
+
+test('resolveDisplayField returns undefined rather than nominating an arbitrary column', async () => {
+  const client = {
+    async get(endpoint) {
+      if (endpoint === '/api/now/table/sys_dictionary') {
+        return {
+          result: [
+            {
+              element: 'label',
+              column_label: 'Label',
+              internal_type: 'string',
+              mandatory: 'false',
+              read_only: 'false',
+              max_length: '255',
+              reference: '',
+              display: 'false',
+            },
+          ],
+        };
+      }
+      if (endpoint === '/api/now/table/sys_db_object') {
+        return { result: [{ name: 'y', label: 'Y', 'super_class.name': '' }] };
+      }
+      return { result: [] };
+    },
+  };
+  const svc = new SchemaService(makeManager(client));
+  assert.equal(await svc.resolveDisplayField('y', 'nodisplay'), undefined);
+});
+
+test('fieldMetaAmong returns type + length for known fields and omits the rest', async () => {
+  const client = makeStubClient();
+  const svc = new SchemaService(makeManager(client));
+
+  const meta = await svc.fieldMetaAmong(
+    'incident',
+    ['short_description', 'caller_id', 'caller_id.department.name', 'nope'],
+    'metatest',
+  );
+
+  assert.deepEqual(meta.short_description, { type: 'string', maxLength: 160 });
+  assert.deepEqual(meta.caller_id, { type: 'reference', maxLength: 32 });
+  // A dot-walked name resolves on another table; an unknown name resolves
+  // nowhere. Both are absent rather than present-with-a-guess.
+  assert.ok(!('caller_id.department.name' in meta));
+  assert.ok(!('nope' in meta));
+});
+
+test('fieldMetaAmong returns {} instead of throwing when the schema will not load', async () => {
+  const broken = {
+    async get() {
+      throw new Error('no dictionary access');
+    },
+  };
+  const svc = new SchemaService(makeManager(broken));
+  assert.deepEqual(await svc.fieldMetaAmong('incident', ['priority'], 'brokentest'), {});
 });
 
 test('getTableSchema marks a nonexistent table exists:false', async () => {

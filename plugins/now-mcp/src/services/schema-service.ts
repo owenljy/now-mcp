@@ -202,6 +202,102 @@ export class SchemaService {
 	}
 
 	/**
+	 * A table and every ancestor it extends, child first.
+	 *
+	 * Needed wherever "who points at this record" is the question: a reference
+	 * field declared against `task` holds incident sys_ids just as happily as
+	 * task ones, so looking only for fields whose `reference` is `incident`
+	 * misses most of the real referrers.
+	 *
+	 * Each hop is a cached schema read. Returns what it resolved before any
+	 * failure rather than throwing — a partial chain still beats none.
+	 */
+	async tableChain(tableName: string, instance?: string): Promise<string[]> {
+		const chain: string[] = [];
+		const visited = new Set<string>();
+		let current: string | undefined = tableName;
+		try {
+			while (current && !visited.has(current)) {
+				visited.add(current);
+				chain.push(current);
+				const schema: TableMetadata = await this.getTableSchema(current, false, instance);
+				current = schema.extends;
+			}
+		} catch (error) {
+			logger.debug(`Table-chain walk stopped early for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return chain;
+	}
+
+	/**
+	 * The column whose value the UI shows wherever a record of this table is
+	 * referenced.
+	 *
+	 * Walks the inheritance chain, because sys_dictionary.display sits on the
+	 * table where the column is DEFINED, not where it is used: incident's
+	 * display field is `number`, flagged on `task`. Reading only the local
+	 * dictionary (what includeExtended:false fetches) finds nothing for most
+	 * child tables, so this walk is independent of that flag.
+	 *
+	 * `source` distinguishes a real dictionary flag from the platform's
+	 * fallback-to-`name` convention, so a caller can tell an authoritative
+	 * answer from an inferred one. Returns undefined when neither applies —
+	 * some tables genuinely have no display column, and saying so beats
+	 * nominating an arbitrary field.
+	 */
+	async resolveDisplayField(
+		tableName: string,
+		instance?: string,
+	): Promise<{ field: string; source: 'dictionary' | 'name_convention' } | undefined> {
+		try {
+			const known = await this.collectFields(tableName, instance);
+			for (const [name, meta] of known) {
+				if (meta.display) return { field: name, source: 'dictionary' };
+			}
+			if (known.has('name')) return { field: 'name', source: 'name_convention' };
+			return undefined;
+		} catch (error) {
+			logger.debug(`Display-field resolution skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+	}
+
+	/**
+	 * Dictionary type + max_length for a set of field names, resolved through
+	 * the inheritance chain. Returns only the names that resolved, so an unknown
+	 * or dot-walked name is absent rather than present-with-a-guess.
+	 *
+	 * Every schema in the chain is already cached by the time a query returns
+	 * (field validation walked it on the way in), so this costs no API call on
+	 * the path it exists for: enriching a zero-result response.
+	 */
+	async fieldMetaAmong(
+		tableName: string,
+		fieldNames: string[],
+		instance?: string,
+	): Promise<Record<string, { type: string; maxLength?: number }>> {
+		if (fieldNames.length === 0) return {};
+		try {
+			const known = await this.collectFields(tableName, instance);
+			const out: Record<string, { type: string; maxLength?: number }> = {};
+			for (const name of fieldNames) {
+				const meta = known.get(name);
+				if (meta) out[name] = { type: meta.type, maxLength: meta.maxLength };
+			}
+			return out;
+		} catch (error) {
+			logger.debug(`Field-meta lookup skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return {};
+		}
+	}
+
+	/**
 	 * Suggest the closest real table name to a (possibly typo'd) one. Used when a
 	 * table fails to resolve, to tell "typo'd table" apart from "no read access".
 	 * Returns undefined if nothing is close enough (or the name is exact — an
@@ -327,9 +423,10 @@ export class SchemaService {
 	}
 
 	/**
-	 * Get detailed schema information for a table
+	 * Get detailed schema information for a table.
+	 *
 	 * @param tableName Name of the table
-	 * @param includeExtended Include fields from parent tables
+	 * @param includeExtended Include fields inherited from parent tables
 	 * @param instance Optional instance name
 	 */
 	async getTableSchema(
@@ -337,11 +434,38 @@ export class SchemaService {
 		includeExtended: boolean = false,
 		instance?: string,
 	): Promise<TableMetadata> {
+		if (includeExtended) return this.getInheritedTableSchema(tableName, instance);
+		return this.getLocalTableSchema(tableName, instance);
+	}
+
+	/**
+	 * A table's own dictionary rows PLUS every field it inherits.
+	 *
+	 * sys_dictionary is keyed by the table a column is DEFINED on, so
+	 * `name=incident` genuinely does not contain `number` — that row belongs to
+	 * `task`. The only way to answer "every field incident exposes" is to walk
+	 * the chain, which is what collectFields does and what includeExtended has
+	 * always claimed to do.
+	 *
+	 * Each table in the chain is cached independently, so the walk costs at most
+	 * one request per ancestor and usually zero.
+	 */
+	private async getInheritedTableSchema(
+		tableName: string,
+		instance?: string,
+	): Promise<TableMetadata> {
+		const base = await this.getLocalTableSchema(tableName, instance);
+		if (!base.exists || !base.extends) return base;
+		const known = await this.collectFields(tableName, instance);
+		return { ...base, fields: [...known.values()] };
+	}
+
+	private async getLocalTableSchema(tableName: string, instance?: string): Promise<TableMetadata> {
 		// Defense-in-depth: schema discovery bypasses validateTableName, so gate it
 		// here too — a blocked table's structure shouldn't be readable either.
 		assertTableAllowed(tableName);
 		const target = this.resolveCacheTarget(instance);
-		const cacheKey = `schema:${target.cacheNamespace}:${tableName}:${includeExtended}`;
+		const cacheKey = `schema:v2:local:${target.cacheNamespace}:${tableName}`;
 
 		// Check cache first
 		const cached = this.getFromCache<TableMetadata>(cacheKey);
@@ -362,15 +486,15 @@ export class SchemaService {
 		logger.info(`Fetching table schema: ${tableName}`, {
 			instance: target.name,
 			instanceUrl: target.config.url,
-			includeExtended,
 		});
 
 		const client = target.client;
 
-		// Query sys_dictionary table for field definitions
-		const query = includeExtended
-			? `name=${tableName}`
-			: `name=${tableName}^internal_type!=collection`;
+		// This table's OWN dictionary rows. The `collection` row is the table
+		// itself, not a column — it carries an empty `element` and would surface
+		// as a nameless field. Inherited columns live on the ancestor's rows and
+		// are merged in by getInheritedTableSchema.
+		const query = `name=${tableName}^internal_type!=collection`;
 
 		// The field definitions (sys_dictionary) and the table metadata
 		// (sys_db_object) are independent reads — fetch them concurrently so the
@@ -387,11 +511,12 @@ export class SchemaService {
 					read_only: string;
 					max_length: string;
 					reference: unknown;
+					display: string;
 				}>;
 			}>('/api/now/table/sys_dictionary', {
 				sysparm_query: query,
 				sysparm_fields:
-					'element,column_label,internal_type,mandatory,read_only,max_length,reference',
+					'element,column_label,internal_type,mandatory,read_only,max_length,reference,display',
 				sysparm_limit: 1000,
 				// internal_type and reference are REFERENCE columns on sys_dictionary, so
 				// without this they come back as {value, link} objects rather than plain
@@ -424,6 +549,10 @@ export class SchemaService {
 			readOnly: field.read_only === 'true',
 			maxLength: field.max_length ? parseInt(field.max_length, 10) : undefined,
 			reference: normalizeSNRef(field.reference),
+			// Only ever true for one column per table — the one whose value the UI
+			// shows wherever the record is referenced. Emitted as undefined rather
+			// than false so it costs nothing on the 99% of fields that aren't it.
+			display: field.display === 'true' ? true : undefined,
 		}));
 
 		const tableInfo = tableResponse.result[0];

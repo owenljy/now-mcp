@@ -41,4 +41,5 @@ export const DiffRecordsOutputSchema = z.object({
 	),
 	// True when a diffed value exceeded the per-value char cap and was shortened.
 	valuesTruncated: z.boolean().optional(),
+	hints: z.array(z.string()).optional(),
 });

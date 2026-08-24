@@ -194,9 +194,10 @@ test('reading a journal field without displayValue warns that an empty value is 
   assert.match(warnings[0], /comments, work_notes/);
   assert.match(warnings[0], /does NOT mean/);
   assert.match(warnings[0], /displayValue:"all"/);
-  // Also surfaced as its own text block: a caller reading only the summary would
-  // otherwise act on the empty value.
-  assert.ok(res.content.some((c) => /journal field/.test(c.text)));
+  // NOT also emitted as a text block. A result carrying structuredContent has
+  // its text blocks dropped before the model sees them, so a duplicate there
+  // would be paid for on the wire and read by nobody.
+  assert.ok(!res.content.some((c) => /journal field/.test(c.text)));
 });
 
 test('no journal warning when displayValue is already set', async () => {

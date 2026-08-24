@@ -165,7 +165,7 @@ export async function registerTools(
 		// HTTP status, echoed row), the Table Batch API in waves beyond that.
 		createCreateRecordsTool(tableService, batchService, schemaService, graphqlService),
 		createUpdateRecordsTool(tableService, batchService, schemaService, graphqlService),
-		createDeleteRecordsTool(batchService),
+		createDeleteRecordsTool(batchService, tableService, schemaService),
 
 		// Schema discovery
 		createGetTableSchemaTool(schemaService),
