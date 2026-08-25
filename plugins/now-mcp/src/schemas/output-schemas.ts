@@ -237,10 +237,24 @@ export const ListTablesOutputSchema = z.object({
 	success: z.boolean(),
 	count: z.number(),
 	filter: z.string().optional(),
+	concept: z.array(z.string()).optional(),
 	instance: z.string(),
 	...columnarShape('table'),
 	truncated: z.boolean().optional(),
 	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
+	hints: z.array(z.string()).optional(),
+});
+
+/** sn_find_fields */
+export const FindFieldsOutputSchema = z.object({
+	success: z.boolean(),
+	count: z.number(),
+	concept: z.array(z.string()),
+	instance: z.string(),
+	...columnarShape('field'),
+	truncated: z.boolean().optional(),
+	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
+	hints: z.array(z.string()).optional(),
 });
 
 /** sn_get_choice_list */

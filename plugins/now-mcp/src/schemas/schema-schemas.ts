@@ -6,6 +6,23 @@ import { z } from 'zod';
 import { instanceField, tableNameField } from './common.js';
 
 /**
+ * Guidance shared by every concept-search input. It lives in the schema, not in
+ * a skill, so it reaches every MCP client and is read at the moment the call is
+ * composed. One keyword is the common failure mode: the platform's vocabulary
+ * rarely matches the user's wording.
+ */
+const CONCEPT_GUIDANCE =
+	" Pass 3-6 variants rather than one — the platform's vocabulary rarely matches the user's wording (chat → also conversation, messaging, interaction; ticket → incident, task, case). Prefer word stems: escalat covers escalate/escalated/escalation/de-escalation. English only: labels are English unless a language plugin is active, so translate non-English input into English keywords first — searching the original text matches nothing. Avoid filler that matches thousands of rows and ranks nothing (record, data, table, info, management).";
+
+/** Concept keyword list, with the shared guidance appended to `description`. */
+const conceptKeywords = (description: string) =>
+	z
+		.array(z.string().min(1))
+		.min(1)
+		.max(8)
+		.describe(description + CONCEPT_GUIDANCE);
+
+/**
  * Schema for getting table schema/structure
  */
 export const GetTableSchemaSchema = z.object({
@@ -37,6 +54,9 @@ export type GetTableSchemaInput = z.infer<typeof GetTableSchemaSchema>;
 export const ListTablesSchema = z.object({
 	instance: instanceField,
 	filter: z.string().optional().describe('Filter tables by name (supports wildcards with *)'),
+	concept: conceptKeywords(
+		"Concept keywords for when you DON'T know the name — matched against label AND name, OR'd together (a table with a useless label often has an obvious name, and vice versa). Use filter instead when you know part of the name; the two combine as AND when both are given.",
+	).optional(),
 	limit: z
 		.number()
 		.int()
@@ -47,6 +67,27 @@ export const ListTablesSchema = z.object({
 });
 
 export type ListTablesInput = z.infer<typeof ListTablesSchema>;
+
+/**
+ * Schema for finding fields across tables by concept
+ */
+export const FindFieldsSchema = z.object({
+	instance: instanceField,
+	concept: conceptKeywords(
+		"Concept keywords describing the field you're looking for — matched against the field label AND the column name, OR'd together.",
+	),
+	limit: z
+		.number()
+		.int()
+		.positive()
+		.max(200)
+		.default(25)
+		.describe(
+			'Maximum number of fields to return. Keep it small — this is a shortlist to rank, not a census. A large totalMatching means the keywords were too generic.',
+		),
+});
+
+export type FindFieldsInput = z.infer<typeof FindFieldsSchema>;
 
 /**
  * Schema for getting choice list values for a field
@@ -101,6 +142,22 @@ export interface TableListItem {
 	numberOfRecords?: number;
 	/** Scoped-app name (e.g. `x_acme_myapp`); omitted for global/unscoped tables. */
 	scope?: string;
+	/** Which `concept` keywords matched this row; present only on a concept search. */
+	matched?: string;
+}
+
+/** One field hit from a cross-table concept search (`sn_find_fields`). */
+export interface FieldSearchItem {
+	/** The table the field lives on. */
+	table: string;
+	/** The column name. */
+	element: string;
+	label: string;
+	type: string;
+	/** For reference fields, the table pointed at. */
+	reference?: string;
+	/** Which `concept` keywords matched this row. */
+	matched: string;
 }
 
 /**

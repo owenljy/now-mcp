@@ -264,8 +264,31 @@ Reads and writes go over the REST Table/Stats/Attachment APIs. Two additions:
 |---|---|
 | `sn_get_table_schema` | Fields, types, references, mandatory/read-only (cached) |
 | `sn_get_table_structure_from_data` | Infer structure by **sampling real rows** — fallback when `sys_dictionary` is thin/incomplete |
-| `sn_list_tables` | List/filter tables |
+| `sn_list_tables` | List/filter tables — by name fragment (`filter`) or by business concept (`concept`) |
+| `sn_find_fields` | Find a table by one of its **fields**, across every table — "where is the escalation flag stored" |
 | `sn_get_choice_list` | Valid choice values for a field |
+
+These four are one ladder, indexed by what you already know:
+
+| You have | Use |
+|---|---|
+| Part of the table's name | `sn_list_tables` + `filter` |
+| Only the concept ("the chat panel's table") | `sn_list_tables` + `concept` |
+| Only a field the table must carry | `sn_find_fields` |
+| The exact table name | `sn_get_table_schema` |
+
+`concept` matches label **and** name and OR's its keywords; combining it with
+`filter` ANDs the two. Both concept searches return a `matched` column naming
+which keyword hit each row, so a miss tells you which variant to change, and an
+empty result comes back with hints rather than a bare zero. Ranking is
+deliberately left to the caller — the instance returns no relevance order, and
+scope/parent-table/label-exactness are judgment calls, not an algorithm.
+
+`sn_find_fields` always excludes Flow Designer's per-flow variable-pool tables
+(`var__m_*`). Measured on a live instance, searching field labels for
+`escalat` returns 166 rows unfiltered and 50 with the exclusion — and the noise
+is front-loaded, with 15 of the first 20 unfiltered rows being `var__m_*`,
+burying `task.escalation` entirely.
 | `sn_get_security_info` | Consolidated table security posture — the API user's **effective** access verdict (table + field), plus the ACLs, role requirements, data policies and security business rules behind it |
 | `sn_diagnose_mutation` | Read-only mutation preflight **as the background-script identity**: record/field capabilities, before BR abort risks, effective ACL coverage (write mapping, inheritance, wildcards, roles), and reference dependencies |
 

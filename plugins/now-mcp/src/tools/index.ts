@@ -32,6 +32,7 @@ import { createDiagnoseMutationTool } from './diagnose-mutation-tool.js';
 import { createDiffRecordsTool } from './diff-records-tool.js';
 import { createDownloadAttachmentTool } from './download-attachment-tool.js';
 import { createExecuteBackgroundScriptTool } from './execute-background-script-tool.js';
+import { createFindFieldsTool } from './find-fields-tool.js';
 import { createGetAttachmentMetadataTool } from './get-attachment-metadata-tool.js';
 import { createGetChoiceListTool } from './get-choice-list-tool.js';
 import { createGetRuntimeEventsTool } from './get-runtime-events-tool.js';
@@ -167,9 +168,13 @@ export async function registerTools(
 		createUpdateRecordsTool(tableService, batchService, schemaService, graphqlService),
 		createDeleteRecordsTool(batchService, tableService, schemaService),
 
-		// Schema discovery
+		// Schema discovery. Four rungs of one ladder, by what the caller already
+		// knows: a name fragment (sn_list_tables + filter), only the concept
+		// (sn_list_tables + concept), only a field the table must carry
+		// (sn_find_fields), or the exact table name (sn_get_table_schema).
 		createGetTableSchemaTool(schemaService),
 		createListTablesTool(schemaService),
+		createFindFieldsTool(schemaService),
 		createGetChoiceListTool(schemaService),
 		// Data-inference fallback for tables whose sys_dictionary is thin/incomplete.
 		createGetTableStructureFromDataTool(tableService),

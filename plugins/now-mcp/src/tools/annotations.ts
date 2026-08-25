@@ -76,6 +76,7 @@ export const TOOL_ANNOTATIONS: Record<string, ToolAnnotations> = {
 	sn_aggregate_records: RO,
 	sn_get_table_schema: RO,
 	sn_list_tables: RO,
+	sn_find_fields: RO,
 	sn_get_choice_list: RO,
 	sn_get_table_structure_from_data: RO,
 	sn_diff_records: RO,

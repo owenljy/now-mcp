@@ -9,10 +9,12 @@ import { join } from 'node:path';
 import type { InstanceManager } from '../client/instance-manager.js';
 import type {
 	FieldMetadata,
+	FieldSearchItem,
 	TableListItem,
 	TableMetadata,
 	TableScopeInfo,
 } from '../schemas/schema-schemas.js';
+import { appendConceptOrGroup, matchedKeywords, sanitizeKeywords } from '../utils/concept-query.js';
 import { type FieldValidationResult, validateFieldNames } from '../utils/field-validation.js';
 import { closestMatch } from '../utils/levenshtein.js';
 import { logger } from '../utils/logger.js';
@@ -579,14 +581,18 @@ export class SchemaService {
 	 * @param filter Optional filter for table names
 	 * @param limit Maximum number of tables to return
 	 * @param instance Optional instance name
+	 * @param concept Optional concept keywords matched against label AND name
 	 */
 	async listTables(
 		filter?: string,
 		limit: number = 100,
 		instance?: string,
+		concept?: string[],
 	): Promise<TableListItem[]> {
 		const target = this.resolveCacheTarget(instance);
-		const cacheKey = `tables:${target.cacheNamespace}:${filter || 'all'}:${limit}`;
+		const keywords = concept ? sanitizeKeywords(concept) : [];
+		const conceptKey = keywords.length > 0 ? keywords.join('|').toLowerCase() : 'none';
+		const cacheKey = `tables:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}:${limit}`;
 
 		// Check cache first
 		const cached = this.getFromCache<TableListItem[]>(cacheKey);
@@ -622,6 +628,11 @@ export class SchemaService {
 				}
 			}
 		}
+		// The concept OR group goes LAST — after the class filter and any name
+		// filter — because `^OR` binds only to the preceding condition. See
+		// concept-query.ts trap 1: emitted earlier, it would swallow those
+		// AND-ed conditions and silently widen the result.
+		query = appendConceptOrGroup(query, ['label', 'name'], keywords);
 
 		const response = await client.get<{
 			result: Array<{
@@ -647,6 +658,11 @@ export class SchemaService {
 				// it doesn't repeat on every row — presence of `scope` already signals
 				// a scoped/custom app table.
 				scope: scopeName && scopeName !== 'global' ? scopeName : undefined,
+				// Only on a concept search — otherwise the key is absent and no
+				// `matched` column is emitted at all.
+				...(keywords.length > 0
+					? { matched: matchedKeywords([table.label, table.name], keywords).join(',') }
+					: {}),
 			};
 		});
 
@@ -656,6 +672,86 @@ export class SchemaService {
 		logger.info(`Retrieved ${tables.length} tables`);
 
 		return tables;
+	}
+
+	/**
+	 * Find fields ACROSS tables by concept — the inverse of getTableSchema,
+	 * which needs the table name up front.
+	 * @param concept Keywords matched against field label AND column name
+	 * @param limit Maximum number of fields to return
+	 * @param instance Optional instance name
+	 */
+	async findFields(
+		concept: string[],
+		limit: number = 25,
+		instance?: string,
+	): Promise<{ fields: FieldSearchItem[]; keywords: string[] }> {
+		const target = this.resolveCacheTarget(instance);
+		const keywords = sanitizeKeywords(concept);
+		if (keywords.length === 0) return { fields: [], keywords };
+
+		const cacheKey = `findfields:${target.cacheNamespace}:${keywords
+			.join('|')
+			.toLowerCase()}:${limit}`;
+		const cached = this.getFromCache<{
+			fields: FieldSearchItem[];
+			keywords: string[];
+		}>(cacheKey);
+		if (cached) {
+			logger.debug('Cache hit for field search');
+			return cached;
+		}
+
+		logger.info('Searching fields by concept', {
+			instance: target.name,
+			instanceUrl: target.config.url,
+			keywords,
+			limit,
+		});
+
+		// AND-ed conditions FIRST, concept OR group LAST (concept-query.ts trap 1).
+		//
+		//  - `elementISNOTEMPTY` drops the table-definition rows (empty `element`),
+		//    which describe tables rather than fields — sn_list_tables' job.
+		//  - `nameNOT LIKEvar__m_` excludes Flow Designer's per-flow variable-pool
+		//    tables. Not optional: measured on a live instance, searching
+		//    `column_labelLIKEescalat` returns 166 rows unfiltered and 50 with this
+		//    exclusion, and the noise is front-loaded — 15 of the first 20
+		//    unfiltered rows were `var__m_*`, burying task.escalation entirely.
+		let query = 'elementISNOTEMPTY^nameNOT LIKEvar__m_';
+		query = appendConceptOrGroup(query, ['column_label', 'element'], keywords);
+
+		const client = target.client;
+		const response = await client.get<{
+			result: Array<{
+				name: string;
+				element: string;
+				column_label: string;
+				internal_type: string;
+				'reference.name': string;
+			}>;
+		}>('/api/now/table/sys_dictionary', {
+			sysparm_query: query,
+			sysparm_fields: 'name,element,column_label,internal_type,reference.name',
+			sysparm_limit: limit,
+			sysparm_order_by: 'name',
+		});
+
+		const fields: FieldSearchItem[] = response.result.map((row) => ({
+			table: row.name,
+			element: row.element,
+			label: row.column_label,
+			type: normalizeSNRef(row.internal_type) ?? '',
+			reference: normalizeSNRef(row['reference.name']),
+			matched: matchedKeywords([row.column_label, row.element], keywords).join(','),
+		}));
+
+		const result = { fields, keywords };
+		this.setCache(cacheKey, result);
+
+		logger.info(`Found ${fields.length} field(s) matching concept`);
+
+		return result;
 	}
 
 	/**
