@@ -13,6 +13,7 @@ import type {
 	SingleRecordResponse,
 	TableAPIResponse,
 } from '../types/servicenow.js';
+import { summarizeRecordPayload } from '../utils/log-safety.js';
 import { logger } from '../utils/logger.js';
 import { queryNowSdkWithAlignedProfile } from '../utils/now-sdk-cli.js';
 import { transactionScopeParam } from '../utils/transaction-scope.js';
@@ -297,7 +298,10 @@ export class TableService {
 		const scopeParam = await transactionScopeParam(this.schemaService, tableName, instance);
 		const endpoint = `${API_ENDPOINTS.TABLE_RECORD(tableName)}?sysparm_exclude_reference_link=true${scopeParam}`;
 
-		logger.debug(`Creating record in ${tableName}`, { data, instance: instance || 'default' });
+		logger.debug(`Creating record in ${tableName}`, {
+			payload: summarizeRecordPayload(data),
+			instance: instance || 'default',
+		});
 
 		const response = await client.post<SingleRecordResponse<T>>(endpoint, data);
 
@@ -338,7 +342,7 @@ export class TableService {
 		const endpoint = `${API_ENDPOINTS.TABLE_RECORD_BY_ID(tableName, sysId)}?sysparm_exclude_reference_link=true${scopeParam}`;
 
 		logger.debug(`Updating record ${tableName}/${sysId}`, {
-			data,
+			payload: summarizeRecordPayload(data),
 			updateType: full ? 'full' : 'partial',
 			instance: instance || 'default',
 		});

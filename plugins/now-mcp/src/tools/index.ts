@@ -20,6 +20,7 @@ import { GraphqlService } from '../services/graphql-service.js';
 import { SchemaService } from '../services/schema-service.js';
 import { ScriptService } from '../services/script-service.js';
 import { TableService } from '../services/table-service.js';
+import { summarizeToolArguments } from '../utils/log-safety.js';
 import { logger } from '../utils/logger.js';
 import { isNowSdkAvailable } from '../utils/now-sdk-cli.js';
 import { formatToolCall } from '../utils/tool-log.js';
@@ -87,7 +88,10 @@ function withLogging(
 ): (args: unknown, extra: unknown) => Promise<ToolResult> {
 	return async (args: unknown): Promise<ToolResult> => {
 		const operationId = randomUUID();
-		logger.debug(`Tool called: ${name}`, { arguments: args, operationId });
+		logger.debug(`Tool called: ${name}`, {
+			arguments: summarizeToolArguments(args),
+			operationId,
+		});
 
 		// Best-effort extraction of the target instance for the structured log.
 		const instance =

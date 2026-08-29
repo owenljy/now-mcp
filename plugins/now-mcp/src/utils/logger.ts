@@ -6,6 +6,8 @@
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
+import { sanitizeLogData } from './log-safety.js';
+
 /**
  * MCP logging levels we actually emit. 'warn' maps to the MCP spec's 'warning'
  * (the full spec enum also has notice/critical/alert/emergency, which we don't
@@ -50,7 +52,7 @@ class Logger {
 		const sender = this.mcpSender;
 		if (!sender) return;
 		try {
-			const payload = data !== undefined ? { message, data } : { message };
+			const payload = data !== undefined ? { message, data: sanitizeLogData(data) } : { message };
 			sender({ level: MCP_LEVELS[level], data: payload });
 		} catch {
 			// Never let MCP forwarding surface an error — stderr already has the log.
@@ -70,7 +72,9 @@ class Logger {
 		const prefix = `[${timestamp}] [${level.toUpperCase()}]`;
 
 		if (data !== undefined) {
-			const dataStr = typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data);
+			const safeData = sanitizeLogData(data);
+			const dataStr =
+				typeof safeData === 'object' ? JSON.stringify(safeData, null, 2) : String(safeData);
 			return `${prefix} ${message}\n${dataStr}`;
 		}
 
