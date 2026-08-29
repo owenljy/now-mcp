@@ -55,6 +55,13 @@ test('server advertises a spec-compliant tool list over MCP stdio', { timeout: 3
       assert.ok(byName.has(name), `expected core tool "${name}" to be advertised`);
     }
 
+    // A call that omits `instance` is resolved once at the tool boundary. The
+    // concrete target and correlation id must be returned as result metadata.
+    const status = await client.callTool({ name: 'sn_connection_status', arguments: {} });
+    assert.equal(status._meta.instance, 'dev');
+    assert.match(status._meta.operationId, /^[0-9a-f-]{36}$/i);
+    assert.equal(typeof status._meta.durationMs, 'number');
+
     // Every advertised tool must satisfy the MCP tool contract.
     for (const tool of tools) {
       assert.equal(typeof tool.name, 'string');

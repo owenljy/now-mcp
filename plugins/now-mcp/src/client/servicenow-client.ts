@@ -11,7 +11,7 @@ import {
 	NetworkError,
 } from '../types/errors.js';
 import type { AuthConfig } from '../types/instance.js';
-import { recordWrite } from '../utils/audit.js';
+import { recordWrite, type WriteAuditOutcome } from '../utils/audit.js';
 import {
 	CircuitBreaker,
 	type CircuitBreakerSnapshot,
@@ -278,10 +278,12 @@ export class ServiceNowClient {
 	 * Performs HTTP POST request with retry logic
 	 */
 	async post<T>(endpoint: string, data: unknown): Promise<T> {
-		recordWrite('POST', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(
-			() => this.doFetch<T>(endpoint, { method: 'POST', body: data }),
-			{ allowAutomaticRetry: false, method: 'POST', endpoint },
+		return this.auditedMutation('POST', endpoint, () =>
+			this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'POST', body: data }), {
+				allowAutomaticRetry: false,
+				method: 'POST',
+				endpoint,
+			}),
 		);
 	}
 
@@ -289,10 +291,12 @@ export class ServiceNowClient {
 	 * Performs HTTP PUT request with retry logic
 	 */
 	async put<T>(endpoint: string, data: unknown): Promise<T> {
-		recordWrite('PUT', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(
-			() => this.doFetch<T>(endpoint, { method: 'PUT', body: data }),
-			{ allowAutomaticRetry: false, method: 'PUT', endpoint },
+		return this.auditedMutation('PUT', endpoint, () =>
+			this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'PUT', body: data }), {
+				allowAutomaticRetry: false,
+				method: 'PUT',
+				endpoint,
+			}),
 		);
 	}
 
@@ -300,10 +304,12 @@ export class ServiceNowClient {
 	 * Performs HTTP PATCH request with retry logic
 	 */
 	async patch<T>(endpoint: string, data: unknown): Promise<T> {
-		recordWrite('PATCH', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(
-			() => this.doFetch<T>(endpoint, { method: 'PATCH', body: data }),
-			{ allowAutomaticRetry: false, method: 'PATCH', endpoint },
+		return this.auditedMutation('PATCH', endpoint, () =>
+			this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'PATCH', body: data }), {
+				allowAutomaticRetry: false,
+				method: 'PATCH',
+				endpoint,
+			}),
 		);
 	}
 
@@ -311,12 +317,13 @@ export class ServiceNowClient {
 	 * Performs HTTP DELETE request with retry logic
 	 */
 	async delete<T>(endpoint: string): Promise<T> {
-		recordWrite('DELETE', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'DELETE' }), {
-			allowAutomaticRetry: false,
-			method: 'DELETE',
-			endpoint,
-		});
+		return this.auditedMutation('DELETE', endpoint, () =>
+			this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'DELETE' }), {
+				allowAutomaticRetry: false,
+				method: 'DELETE',
+				endpoint,
+			}),
+		);
 	}
 
 	/**
@@ -335,12 +342,34 @@ export class ServiceNowClient {
 		}
 
 		const payload = buildBatchPayload(randomUUID(), requests);
-		const raw = await this.requestWithRetry<unknown>(
-			() => this.doFetch<unknown>(API_ENDPOINTS.BATCH, { method: 'POST', body: payload }),
-			{ allowAutomaticRetry: false, method: 'POST', endpoint: API_ENDPOINTS.BATCH },
-		);
-
-		return parseBatchResponse(raw, requests);
+		try {
+			const raw = await this.requestWithRetry<unknown>(
+				() => this.doFetch<unknown>(API_ENDPOINTS.BATCH, { method: 'POST', body: payload }),
+				{ allowAutomaticRetry: false, method: 'POST', endpoint: API_ENDPOINTS.BATCH },
+			);
+			const outcome = parseBatchResponse(raw, requests);
+			for (const request of requests) {
+				if (!isMutatingMethod(request.method)) continue;
+				const response = outcome.responses.get(request.id);
+				const succeeded = Boolean(response && response.statusCode < 400);
+				recordWrite(
+					request.method,
+					request.url,
+					this.instanceUrl,
+					'outcome',
+					succeeded ? 'succeeded' : 'failed',
+				);
+			}
+			return outcome;
+		} catch (error) {
+			const auditOutcome = this.auditOutcomeFor(error);
+			for (const request of requests) {
+				if (isMutatingMethod(request.method)) {
+					recordWrite(request.method, request.url, this.instanceUrl, 'outcome', auditOutcome);
+				}
+			}
+			throw error;
+		}
 	}
 
 	/**
@@ -356,12 +385,7 @@ export class ServiceNowClient {
 		tableName: string,
 		recordSysId: string,
 	): Promise<unknown> {
-		// Attachment upload is a write; audit it like every other POST/PUT/PATCH/DELETE.
-		recordWrite(
-			'POST',
-			`${API_ENDPOINTS.ATTACHMENT_UPLOAD} (${tableName}/${recordSysId})`,
-			this.instanceUrl,
-		);
+		const auditEndpoint = `${API_ENDPOINTS.ATTACHMENT_UPLOAD} (${tableName}/${recordSysId})`;
 
 		// ServiceNow's multipart attachment endpoint requires table_name/table_sys_id
 		// as form fields *before* the file part, and the file part must be named
@@ -371,19 +395,41 @@ export class ServiceNowClient {
 		formData.append('table_sys_id', recordSysId);
 		formData.append('uploadFile', new Blob([file]), fileName);
 
-		return this.requestWithRetry(
-			() =>
-				this.doFetch(API_ENDPOINTS.ATTACHMENT_UPLOAD, {
+		return this.auditedMutation('POST', auditEndpoint, () =>
+			this.requestWithRetry(
+				() =>
+					this.doFetch(API_ENDPOINTS.ATTACHMENT_UPLOAD, {
+						method: 'POST',
+						body: formData,
+						timeoutMs: HTTP_CONFIG.ATTACHMENT_TIMEOUT,
+					}),
+				{
+					allowAutomaticRetry: false,
 					method: 'POST',
-					body: formData,
-					timeoutMs: HTTP_CONFIG.ATTACHMENT_TIMEOUT,
-				}),
-			{
-				allowAutomaticRetry: false,
-				method: 'POST',
-				endpoint: API_ENDPOINTS.ATTACHMENT_UPLOAD,
-			},
+					endpoint: API_ENDPOINTS.ATTACHMENT_UPLOAD,
+				},
+			),
 		);
+	}
+
+	private auditOutcomeFor(error: unknown): WriteAuditOutcome {
+		return error instanceof MutationOutcomeUncertainError ? 'uncertain' : 'failed';
+	}
+
+	private async auditedMutation<T>(
+		method: string,
+		endpoint: string,
+		operation: () => Promise<T>,
+	): Promise<T> {
+		recordWrite(method, endpoint, this.instanceUrl, 'attempt');
+		try {
+			const result = await operation();
+			recordWrite(method, endpoint, this.instanceUrl, 'outcome', 'succeeded');
+			return result;
+		} catch (error) {
+			recordWrite(method, endpoint, this.instanceUrl, 'outcome', this.auditOutcomeFor(error));
+			throw error;
+		}
 	}
 
 	/**

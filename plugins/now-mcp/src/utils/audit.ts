@@ -15,12 +15,21 @@
 
 import { appendFileSync, renameSync, statSync } from 'node:fs';
 import { logger } from './logger.js';
+import { getOperationContext } from './operation-context.js';
+
+export type WriteAuditEvent = 'attempt' | 'outcome';
+export type WriteAuditOutcome = 'succeeded' | 'failed' | 'uncertain';
 
 export interface WriteAuditEntry {
 	timestamp: string;
 	method: string;
 	endpoint: string;
 	host: string;
+	event: WriteAuditEvent;
+	outcome?: WriteAuditOutcome;
+	operationId?: string;
+	instance?: string;
+	tool?: string;
 }
 
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -64,15 +73,35 @@ function rotateIfNeeded(auditFile: string, limit: number): void {
 /**
  * Record a write operation to the audit trail.
  */
-export function recordWrite(method: string, endpoint: string, instanceUrl: string): void {
+export function recordWrite(
+	method: string,
+	endpoint: string,
+	instanceUrl: string,
+	event: WriteAuditEvent = 'attempt',
+	outcome?: WriteAuditOutcome,
+): void {
+	const context = getOperationContext();
 	const entry: WriteAuditEntry = {
 		timestamp: new Date().toISOString(),
 		method: method.toUpperCase(),
 		endpoint,
 		host: hostOf(instanceUrl),
+		event,
+		...(outcome ? { outcome } : {}),
+		...(context
+			? {
+					operationId: context.operationId,
+					instance: context.instance,
+					tool: context.tool,
+				}
+			: {}),
 	};
 
-	logger.info(`[AUDIT] ${entry.method} ${entry.endpoint} @ ${entry.host}`);
+	const correlation = entry.operationId ? ` op=${entry.operationId}` : '';
+	const result = entry.outcome ? ` ${entry.outcome}` : '';
+	logger.info(
+		`[AUDIT] ${entry.event}${result} ${entry.method} ${entry.endpoint} @ ${entry.host}${correlation}`,
+	);
 
 	const auditFile = process.env.SERVICENOW_AUDIT_LOG;
 	if (auditFile) {

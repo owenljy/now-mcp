@@ -23,6 +23,7 @@ import { TableService } from '../services/table-service.js';
 import { summarizeToolArguments } from '../utils/log-safety.js';
 import { logger } from '../utils/logger.js';
 import { isNowSdkAvailable } from '../utils/now-sdk-cli.js';
+import { runWithOperationContext } from '../utils/operation-context.js';
 import { formatToolCall } from '../utils/tool-log.js';
 import { createAggregateRecordsTool } from './aggregate-records-tool.js';
 import { TOOL_ANNOTATIONS } from './annotations.js';
@@ -85,55 +86,65 @@ function withLogging(
 	name: string,
 	handler: ToolDescriptor['handler'],
 	lowLevelServer: Server,
+	instanceManager: InstanceManager,
 ): (args: unknown, extra: unknown) => Promise<ToolResult> {
 	return async (args: unknown): Promise<ToolResult> => {
 		const operationId = randomUUID();
-		logger.debug(`Tool called: ${name}`, {
-			arguments: summarizeToolArguments(args),
-			operationId,
-		});
-
-		// Best-effort extraction of the target instance for the structured log.
-		const instance =
+		const selector =
 			args &&
 			typeof args === 'object' &&
 			typeof (args as Record<string, unknown>).instance === 'string'
 				? ((args as Record<string, unknown>).instance as string)
 				: undefined;
+		// Resolve once at the call boundary. Pinning the concrete name into ordinary
+		// tool args prevents a concurrent default switch from splitting requests,
+		// cache keys, logs and responses across two instances mid-call.
+		const instance = instanceManager.resolveInstance(selector).name;
+		const handlerArgs =
+			name !== 'sn_connection_status' && args && typeof args === 'object' && !Array.isArray(args)
+				? { ...(args as Record<string, unknown>), instance }
+				: args;
+		logger.debug(`Tool called: ${name}`, {
+			arguments: summarizeToolArguments(handlerArgs),
+			operationId,
+		});
 
-		const start = Date.now();
-		try {
-			const result = await handler(args, lowLevelServer);
-			const durationMs = Date.now() - start;
-			const ok = !(result && result.isError === true);
-			const { msg, data } = formatToolCall({
-				tool: name,
-				durationMs,
-				ok,
-				instance,
-			});
-			logger.info(msg, { ...data, operationId });
-			return {
-				...result,
-				_meta: {
-					instance: instance || 'default',
+		return runWithOperationContext({ operationId, instance, tool: name }, async () => {
+			const start = Date.now();
+			try {
+				const result = await handler(handlerArgs, lowLevelServer);
+				const durationMs = Date.now() - start;
+				const ok = !(result && result.isError === true);
+				const { msg, data } = formatToolCall({
+					tool: name,
 					durationMs,
-					...(result._meta ?? {}),
-				},
-			};
-		} catch (error) {
-			const durationMs = Date.now() - start;
-			const message = error instanceof Error ? error.message : String(error);
-			const { msg, data } = formatToolCall({
-				tool: name,
-				durationMs,
-				ok: false,
-				instance,
-				error: message,
-			});
-			logger.info(msg, { ...data, operationId });
-			throw error;
-		}
+					ok,
+					instance,
+				});
+				logger.info(msg, { ...data, operationId });
+				return {
+					...result,
+					_meta: {
+						instance,
+						durationMs,
+						operationId,
+						...(result._meta ?? {}),
+					},
+				};
+			} catch (error) {
+				const durationMs = Date.now() - start;
+				const message = error instanceof Error ? error.message : String(error);
+				const { msg, data } = formatToolCall({
+					tool: name,
+					durationMs,
+					ok: false,
+					instance,
+					error: message,
+				});
+				logger.info(msg, { ...data, operationId });
+				throw error;
+			}
+		});
 	};
 }
 
@@ -240,7 +251,7 @@ export async function registerTools(
 				outputSchema: tool.outputSchema as never,
 				annotations: TOOL_ANNOTATIONS[tool.name],
 			},
-			withLogging(tool.name, tool.handler, server.server) as never,
+			withLogging(tool.name, tool.handler, server.server, instanceManager) as never,
 		);
 		logger.info(`Registered tool: ${tool.name}`);
 	}

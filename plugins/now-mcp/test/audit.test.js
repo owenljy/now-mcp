@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { recordWrite } from '../build/utils/audit.js';
+import { runWithOperationContext } from '../build/utils/operation-context.js';
 
 function withAuditEnv(fn) {
   const dir = mkdtempSync(join(tmpdir(), 'sn-audit-'));
@@ -80,5 +81,31 @@ test('does not rotate when the cap is disabled (0 / invalid)', () => {
     recordWrite('POST', '/api/now/table/incident', 'https://dev123.service-now.com');
 
     assert.ok(!existsSync(`${file}.1`), 'no rotation when cap is disabled');
+  });
+});
+
+test('carries tool operation correlation into attempt and outcome entries', async () => {
+  await new Promise((resolve, reject) => {
+    withAuditEnv((file) => {
+      runWithOperationContext(
+        { operationId: 'op-123', instance: 'dev-b', tool: 'sn_update_records' },
+        async () => {
+          recordWrite('PATCH', '/api/now/table/incident/abc', 'https://dev-b.service-now.com');
+          recordWrite(
+            'PATCH',
+            '/api/now/table/incident/abc',
+            'https://dev-b.service-now.com',
+            'outcome',
+            'succeeded',
+          );
+          const lines = readFileSync(file, 'utf-8').trim().split('\n').map(JSON.parse);
+          assert.deepEqual(lines.map((line) => line.event), ['attempt', 'outcome']);
+          assert.equal(lines[1].outcome, 'succeeded');
+          assert.equal(lines[0].operationId, 'op-123');
+          assert.equal(lines[0].instance, 'dev-b');
+          assert.equal(lines[0].tool, 'sn_update_records');
+        },
+      ).then(resolve, reject);
+    });
   });
 });
