@@ -4,7 +4,7 @@
 
 import type { InstanceManager } from '../client/instance-manager.js';
 import { readOnlyRemediation } from '../config/environment.js';
-import { AccessDeniedError, ValidationError } from '../types/errors.js';
+import { AccessDeniedError, ServiceNowError, ValidationError } from '../types/errors.js';
 import { assertTableAllowed } from './table-access.js';
 
 /**
@@ -182,6 +182,21 @@ export function validateFileName(fileName: string): void {
  * Note: readOnly defaults to true if not explicitly set to false
  */
 export function validateWriteAccess(instanceManager: InstanceManager, instanceName?: string): void {
+	// Optional-call keeps lightweight service mocks/backward-compatible manager
+	// implementations working; the real InstanceManager always provides it.
+	if (!instanceName && instanceManager.isDefaultAlignmentPending?.()) {
+		throw new ServiceNowError(
+			'Default instance alignment with now-sdk is still resolving. Nothing was sent. ' +
+				'Retry shortly, or pass an explicit instance name to write to a known target.',
+			503,
+			{
+				operationType: 'write',
+				defaultAlignmentPending: true,
+				currentDefault: instanceManager.getDefaultInstance(),
+			},
+			'DEFAULT_ALIGNMENT_PENDING',
+		);
+	}
 	const config = instanceManager.getConfig(instanceName);
 	// Default to read-only (true) if not explicitly set to false
 	const isReadOnly = config.readOnly !== false;

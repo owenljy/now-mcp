@@ -42,6 +42,14 @@ async function main() {
 			);
 		}
 		instanceManager = new InstanceManager(config.instances, config.source);
+		// Auto-follow is resolved after the handshake. Until it settles, block only
+		// writes that omit `instance`; explicit targets and all reads remain usable.
+		if (
+			instanceManager.getInstanceCount() > 1 &&
+			!process.env.SERVICENOW_FOLLOW_NOW_SDK?.trim().match(/^(0|false|no|off)$/i)
+		) {
+			instanceManager.beginDefaultAlignment();
+		}
 	} catch (error) {
 		initializeLogger('info');
 		configError = error instanceof Error ? error : new Error(String(error));
@@ -69,11 +77,13 @@ async function main() {
 		try {
 			const configured = im.listInstances().map((name) => ({ name, url: im.getConfig(name).url }));
 			const followTo = resolveNowSdkFollow(configured);
-			if (followTo && followTo !== im.getDefaultInstance()) {
-				im.setDefaultInstance(followTo);
+			const previousDefault = im.getDefaultInstance();
+			const applied = im.completeDefaultAlignment(followTo ?? undefined);
+			if (applied && followTo && followTo !== previousDefault) {
 				logger.info(`Default instance re-pointed to '${followTo}' to follow now-sdk.`);
 			}
 		} catch (e) {
+			im.completeDefaultAlignment();
 			logger.warn('follow-now-sdk check failed; keeping YAML default', {
 				error: e instanceof Error ? e.message : String(e),
 			});

@@ -72,12 +72,13 @@ export function registerResources(server: McpServer, instanceManager: InstanceMa
 			mimeType: 'application/json',
 		},
 		async (uri) => {
+			const runtimeDefault = instanceManager.getDefaultInstance();
 			const instances = instanceManager.listInstances().map((name) => {
 				const cfg = instanceManager.getConfig(name);
 				return {
 					name: cfg.name,
 					url: cfg.url,
-					default: cfg.default ?? false,
+					default: name === runtimeDefault,
 					readOnly: cfg.readOnly !== false,
 					authType: cfg.auth.type,
 				};

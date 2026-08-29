@@ -22,6 +22,12 @@ export class InstanceManager {
 	private clients: Map<string, ServiceNowClient> = new Map();
 	private configs: Map<string, InstanceConfig> = new Map();
 	private defaultInstance: string;
+	/**
+	 * True while the post-handshake now-sdk probe is deciding whether the YAML
+	 * default should move. Reads may continue, but an unqualified write must not
+	 * race this decision and land on the wrong instance.
+	 */
+	private defaultAlignmentPending = false;
 	/** Where the config came from — for source-aware runtime error guidance. */
 	private readonly configSource?: ConfigSource;
 
@@ -140,6 +146,29 @@ export class InstanceManager {
 		return this.defaultInstance;
 	}
 
+	/** Mark the runtime default as temporarily unsafe for implicit writes. */
+	beginDefaultAlignment(): void {
+		this.defaultAlignmentPending = true;
+	}
+
+	/** Whether an automatic default-selection probe is still in flight. */
+	isDefaultAlignmentPending(): boolean {
+		return this.defaultAlignmentPending;
+	}
+
+	/**
+	 * Finish the automatic alignment, optionally selecting the matched instance.
+	 * A manual switch cancels the pending probe, so a late background result can
+	 * never override an explicit user choice.
+	 */
+	completeDefaultAlignment(instanceName?: string): boolean {
+		if (!this.defaultAlignmentPending) return false;
+		if (instanceName) this.assertManagedInstance(instanceName);
+		if (instanceName) this.defaultInstance = instanceName;
+		this.defaultAlignmentPending = false;
+		return true;
+	}
+
 	/**
 	 * Check if an instance exists
 	 * @param instanceName Instance name to check
@@ -156,14 +185,19 @@ export class InstanceManager {
 	 * @throws {ServiceNowError} If the instance name is not managed
 	 */
 	setDefaultInstance(instanceName: string): void {
-		if (!this.clients.has(instanceName)) {
-			const available = Array.from(this.clients.keys()).join(', ');
-			throw new ServiceNowError(
-				`Instance '${instanceName}' not found. Available instances: ${available}`,
-				400,
-			);
-		}
+		this.assertManagedInstance(instanceName);
 		this.defaultInstance = instanceName;
+		// An explicit switch wins over an in-flight automatic follow probe.
+		this.defaultAlignmentPending = false;
+	}
+
+	private assertManagedInstance(instanceName: string): void {
+		if (this.clients.has(instanceName)) return;
+		const available = Array.from(this.clients.keys()).join(', ');
+		throw new ServiceNowError(
+			`Instance '${instanceName}' not found. Available instances: ${available}`,
+			400,
+		);
 	}
 
 	/**
