@@ -4,7 +4,12 @@
 
 import { randomUUID } from 'node:crypto';
 import { API_ENDPOINTS, HTTP_CONFIG } from '../config/constants.js';
-import { CircuitOpenError, HttpError, NetworkError } from '../types/errors.js';
+import {
+	CircuitOpenError,
+	HttpError,
+	MutationOutcomeUncertainError,
+	NetworkError,
+} from '../types/errors.js';
 import type { AuthConfig } from '../types/instance.js';
 import { recordWrite } from '../utils/audit.js';
 import {
@@ -54,6 +59,13 @@ interface RequestOptions {
 	responseType?: 'json' | 'arraybuffer';
 	/** When true, resolve to { data, headers } instead of the bare body. */
 	includeHeaders?: boolean;
+}
+
+interface RetryPolicy {
+	/** Reads are safe to replay; mutations are not unless an endpoint proves idempotency. */
+	allowAutomaticRetry: boolean;
+	method: string;
+	endpoint: string;
 }
 
 /** Body plus lower-cased response headers, for callers that need e.g. X-Total-Count. */
@@ -236,7 +248,11 @@ export class ServiceNowClient {
 	 * Performs HTTP GET request with retry logic
 	 */
 	async get<T>(endpoint: string, params?: Record<string, unknown>): Promise<T> {
-		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'GET', params }));
+		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'GET', params }), {
+			allowAutomaticRetry: true,
+			method: 'GET',
+			endpoint,
+		});
 	}
 
 	/**
@@ -247,8 +263,14 @@ export class ServiceNowClient {
 		endpoint: string,
 		params?: Record<string, unknown>,
 	): Promise<ResponseEnvelope<T>> {
-		return this.requestWithRetry<ResponseEnvelope<T>>(() =>
-			this.doFetch<ResponseEnvelope<T>>(endpoint, { method: 'GET', params, includeHeaders: true }),
+		return this.requestWithRetry<ResponseEnvelope<T>>(
+			() =>
+				this.doFetch<ResponseEnvelope<T>>(endpoint, {
+					method: 'GET',
+					params,
+					includeHeaders: true,
+				}),
+			{ allowAutomaticRetry: true, method: 'GET', endpoint },
 		);
 	}
 
@@ -257,8 +279,9 @@ export class ServiceNowClient {
 	 */
 	async post<T>(endpoint: string, data: unknown): Promise<T> {
 		recordWrite('POST', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(() =>
-			this.doFetch<T>(endpoint, { method: 'POST', body: data }),
+		return this.requestWithRetry<T>(
+			() => this.doFetch<T>(endpoint, { method: 'POST', body: data }),
+			{ allowAutomaticRetry: false, method: 'POST', endpoint },
 		);
 	}
 
@@ -267,7 +290,10 @@ export class ServiceNowClient {
 	 */
 	async put<T>(endpoint: string, data: unknown): Promise<T> {
 		recordWrite('PUT', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'PUT', body: data }));
+		return this.requestWithRetry<T>(
+			() => this.doFetch<T>(endpoint, { method: 'PUT', body: data }),
+			{ allowAutomaticRetry: false, method: 'PUT', endpoint },
+		);
 	}
 
 	/**
@@ -275,8 +301,9 @@ export class ServiceNowClient {
 	 */
 	async patch<T>(endpoint: string, data: unknown): Promise<T> {
 		recordWrite('PATCH', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(() =>
-			this.doFetch<T>(endpoint, { method: 'PATCH', body: data }),
+		return this.requestWithRetry<T>(
+			() => this.doFetch<T>(endpoint, { method: 'PATCH', body: data }),
+			{ allowAutomaticRetry: false, method: 'PATCH', endpoint },
 		);
 	}
 
@@ -285,7 +312,11 @@ export class ServiceNowClient {
 	 */
 	async delete<T>(endpoint: string): Promise<T> {
 		recordWrite('DELETE', endpoint, this.instanceUrl);
-		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'DELETE' }));
+		return this.requestWithRetry<T>(() => this.doFetch<T>(endpoint, { method: 'DELETE' }), {
+			allowAutomaticRetry: false,
+			method: 'DELETE',
+			endpoint,
+		});
 	}
 
 	/**
@@ -304,8 +335,9 @@ export class ServiceNowClient {
 		}
 
 		const payload = buildBatchPayload(randomUUID(), requests);
-		const raw = await this.requestWithRetry<unknown>(() =>
-			this.doFetch<unknown>(API_ENDPOINTS.BATCH, { method: 'POST', body: payload }),
+		const raw = await this.requestWithRetry<unknown>(
+			() => this.doFetch<unknown>(API_ENDPOINTS.BATCH, { method: 'POST', body: payload }),
+			{ allowAutomaticRetry: false, method: 'POST', endpoint: API_ENDPOINTS.BATCH },
 		);
 
 		return parseBatchResponse(raw, requests);
@@ -339,12 +371,18 @@ export class ServiceNowClient {
 		formData.append('table_sys_id', recordSysId);
 		formData.append('uploadFile', new Blob([file]), fileName);
 
-		return this.requestWithRetry(() =>
-			this.doFetch(API_ENDPOINTS.ATTACHMENT_UPLOAD, {
+		return this.requestWithRetry(
+			() =>
+				this.doFetch(API_ENDPOINTS.ATTACHMENT_UPLOAD, {
+					method: 'POST',
+					body: formData,
+					timeoutMs: HTTP_CONFIG.ATTACHMENT_TIMEOUT,
+				}),
+			{
+				allowAutomaticRetry: false,
 				method: 'POST',
-				body: formData,
-				timeoutMs: HTTP_CONFIG.ATTACHMENT_TIMEOUT,
-			}),
+				endpoint: API_ENDPOINTS.ATTACHMENT_UPLOAD,
+			},
 		);
 	}
 
@@ -353,12 +391,15 @@ export class ServiceNowClient {
 	 * @param attachmentSysId Attachment sys_id
 	 */
 	async downloadFile(attachmentSysId: string): Promise<Buffer> {
-		const data = await this.requestWithRetry<ArrayBuffer>(() =>
-			this.doFetch<ArrayBuffer>(`/api/now/attachment/${attachmentSysId}/file`, {
-				method: 'GET',
-				responseType: 'arraybuffer',
-				timeoutMs: HTTP_CONFIG.ATTACHMENT_TIMEOUT,
-			}),
+		const endpoint = `/api/now/attachment/${attachmentSysId}/file`;
+		const data = await this.requestWithRetry<ArrayBuffer>(
+			() =>
+				this.doFetch<ArrayBuffer>(endpoint, {
+					method: 'GET',
+					responseType: 'arraybuffer',
+					timeoutMs: HTTP_CONFIG.ATTACHMENT_TIMEOUT,
+				}),
+			{ allowAutomaticRetry: true, method: 'GET', endpoint },
 		);
 
 		return Buffer.from(data);
@@ -415,6 +456,7 @@ export class ServiceNowClient {
 	 */
 	private async requestWithRetry<T>(
 		requestFn: () => Promise<T>,
+		policy: RetryPolicy,
 		retryCount: number = 0,
 		oauthRefreshAttempted = false,
 		skipBreakerGate = false,
@@ -443,7 +485,7 @@ export class ServiceNowClient {
 				logger.warn('OAuth API request returned 401; cleared cached token and retrying once', {
 					instanceUrl: this.instanceUrl,
 				});
-				return this.requestWithRetry(requestFn, retryCount, true, true);
+				return this.requestWithRetry(requestFn, policy, retryCount, true, true);
 			}
 
 			const failureKind = this.classifyFailure(error);
@@ -453,7 +495,11 @@ export class ServiceNowClient {
 			const transformedError = transformError(error);
 
 			// Check if we should retry
-			if (retryCount < HTTP_CONFIG.MAX_RETRIES && isRetryableError(error)) {
+			if (
+				policy.allowAutomaticRetry &&
+				retryCount < HTTP_CONFIG.MAX_RETRIES &&
+				isRetryableError(error)
+			) {
 				// Calculate delay with exponential backoff
 				const delay = this.retryDelay(error, retryCount);
 
@@ -468,7 +514,26 @@ export class ServiceNowClient {
 				await this.sleep(delay);
 
 				// Retry the request
-				return this.requestWithRetry(requestFn, retryCount + 1, oauthRefreshAttempted);
+				return this.requestWithRetry(requestFn, policy, retryCount + 1, oauthRefreshAttempted);
+			}
+
+			// A connection loss/timeout or 5xx after a mutation is ambiguous: the
+			// platform may have committed before the response disappeared. Replaying it
+			// here would turn a transport problem into duplicate business side effects.
+			if (
+				!policy.allowAutomaticRetry &&
+				(error instanceof NetworkError || (error instanceof HttpError && error.status >= 500))
+			) {
+				throw new MutationOutcomeUncertainError({
+					outcome: 'uncertain',
+					retryable: false,
+					method: policy.method,
+					endpoint: policy.endpoint,
+					instanceUrl: this.instanceUrl,
+					reason: transformedError.message,
+					reconciliation:
+						'Query the target record/attachment or inspect the intended downstream state before deciding whether another mutation is needed.',
+				});
 			}
 
 			// Max retries reached or non-retryable error

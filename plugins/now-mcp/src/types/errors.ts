@@ -81,6 +81,35 @@ export class NetworkError extends ServiceNowError {
 	}
 }
 
+export interface MutationOutcomeUncertainDetails {
+	outcome: 'uncertain';
+	retryable: false;
+	method: string;
+	endpoint: string;
+	instanceUrl: string;
+	reason: string;
+	reconciliation: string;
+}
+
+/**
+ * The request may have reached ServiceNow, but no authoritative response came
+ * back. Replaying a non-idempotent mutation could duplicate records, files, or
+ * script side effects, so callers must reconcile state before deciding what to do.
+ */
+export class MutationOutcomeUncertainError extends ServiceNowError {
+	constructor(details: MutationOutcomeUncertainDetails) {
+		super(
+			`${details.method} ${details.endpoint} may have been applied, but its outcome could not be confirmed. ` +
+				'Do not retry blindly; verify the target state first.',
+			undefined,
+			details,
+			'MUTATION_OUTCOME_UNCERTAIN',
+		);
+		this.name = 'MutationOutcomeUncertainError';
+		Object.setPrototypeOf(this, MutationOutcomeUncertainError.prototype);
+	}
+}
+
 export class AccessDeniedError extends ServiceNowError {
 	constructor(message: string, details?: unknown) {
 		super(message, 403, details, 'ACCESS_DENIED');
