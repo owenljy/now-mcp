@@ -37,6 +37,7 @@ import { createExecuteBackgroundScriptTool } from './execute-background-script-t
 import { createFindFieldsTool } from './find-fields-tool.js';
 import { createGetAttachmentMetadataTool } from './get-attachment-metadata-tool.js';
 import { createGetChoiceListTool } from './get-choice-list-tool.js';
+import { createGetRecordTimelineTool } from './get-record-timeline-tool.js';
 import { createGetRuntimeEventsTool } from './get-runtime-events-tool.js';
 import { createGetSecurityInfoTool } from './get-security-info-tool.js';
 import { createGetTableSchemaTool } from './get-table-schema-tool.js';
@@ -198,6 +199,7 @@ export async function registerTools(
 		createDiffRecordsTool(tableService),
 		createGetSecurityInfoTool(tableService, graphqlService),
 		createDiagnoseMutationTool(scriptService),
+		createGetRecordTimelineTool(tableService),
 		createGetRuntimeEventsTool(tableService),
 
 		// Script execution (with advisory schema pre-flight on referenced fields)

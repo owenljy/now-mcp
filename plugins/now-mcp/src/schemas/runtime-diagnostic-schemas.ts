@@ -34,3 +34,5 @@ export const GetRuntimeEventsOutputSchema = z.object({
 	),
 	diagnostics: z.record(z.object({ rows: z.number(), queries: z.number() })),
 });
+
+export type GetRuntimeEventsInput = z.infer<typeof GetRuntimeEventsSchema>;

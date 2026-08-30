@@ -26,6 +26,7 @@ const EXPECTED_CORE_TOOLS = [
   'sn_delete_records',
   'sn_get_table_schema',
   'sn_list_tables',
+  'sn_get_record_timeline',
   'sn_connection_status',
   'sn_reset_connection',
 ];

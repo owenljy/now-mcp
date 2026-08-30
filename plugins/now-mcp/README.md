@@ -192,6 +192,7 @@ returns the full entry stream with timestamps and authors.
 | `sn_update_records` | Patch/replace **one or many** records by sys_id; verifies persistence by default and classifies silent non-persistence |
 | `sn_delete_records` | Delete **one or many** records by sys_id (destructive); verifies deletion by default in a single extra request |
 | `sn_diff_records` | Compare two records on a table field-by-field; returns only what differs |
+| `sn_get_record_timeline` | Reconstruct one record's bounded chronology from field audits, journal entries, Flow Designer contexts, and runtime evidence; marks text-matched logs as correlated rather than proven causation |
 
 Read tools that return rows (`sn_query_records`, `sn_list_tables`,
 `sn_get_choice_list`) use a columnar shape: `{columns: string[], rows:
@@ -335,6 +336,13 @@ Two consequences worth knowing:
 | `sn_execute_background_script` | Run server-side JavaScript; reports transport path/outcome and supports a JSON application-result contract |
 | `sn_upload_attachment` / `sn_download_attachment` | Attach / fetch files (base64) |
 | `sn_get_attachment_metadata` | List attachments on a record (name, type, size) **without** downloading content |
+
+`sn_get_record_timeline` is record-centric: use it for "who changed this field?" or "what
+happened after this RITM was created?" It always anchors the result to a readable target record,
+then merges optional audit, journal, Flow Context, and runtime evidence into one fixed-column chronology. `sn_get_runtime_events` remains the
+system-centric tool for searching bounded logs, queued events, and scheduled triggers when there is
+no single target record. Optional audit/journal/runtime sources that the API user cannot read are
+reported as unavailable; they do not erase evidence returned by the other sources.
 
 ### Instances *(only when more than one instance is configured)*
 | Tool | What it does |
