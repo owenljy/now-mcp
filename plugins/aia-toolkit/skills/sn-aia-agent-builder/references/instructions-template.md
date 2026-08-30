@@ -40,7 +40,7 @@ Your objective is to <state the goal clearly>.
   outcome, never a real success.
 - **escalated** — if bounded retries are exhausted, `# Verify` stays inconclusive after a
   re-check, or there is no safe next action: hand off to <named queue/human> with the full
-  trail and end. (See [../../docs/tool-output-patterns.md → Run-level terminal outcomes](../../docs/tool-output-patterns.md).)
+  trail and end. (See [../../../references/tool-output-patterns.md → Run-level terminal outcomes](../../../references/tool-output-patterns.md).)
 
 # Constraints
 - NEVER <prohibited>. ALWAYS <required>.
@@ -93,7 +93,7 @@ mutating agent gets), not only here.
 such a return means the side-effect did NOT happen, so it reports the dry-run/mock outcome
 rather than a real success (this is the success-interpretation path, distinct from Step 8).
 
-The **canonical Step 8 contract lives in `../../docs/tool-output-patterns.md` ("Step 8 error
+The **canonical Step 8 contract lives in `../../../references/tool-output-patterns.md` ("Step 8 error
 contract" + "Run-level terminal outcomes")** — including the escalate branch and the
 dryRun/mock rows. Keep this copy condensed and point there rather than restating
 the branches. Classify each tool into patterns 1–4 before writing instructions (if you

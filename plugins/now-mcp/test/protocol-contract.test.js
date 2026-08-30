@@ -13,6 +13,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 // (follow is on by default now — must be explicitly turned off here).
 const SERVER_ENV = {
   ...process.env,
+  PLUGIN_ROOT: process.cwd(),
   SERVICENOW_CONFIG_PATH: 'config/sn-credential.example.yaml',
   SERVICENOW_FOLLOW_NOW_SDK: 'false',
 };
@@ -32,7 +33,7 @@ const EXPECTED_CORE_TOOLS = [
 test('server advertises a spec-compliant tool list over MCP stdio', { timeout: 30000 }, async () => {
   const transport = new StdioClientTransport({
     command: 'node',
-    args: ['build/index.js'],
+    args: ['scripts/launch.mjs'],
     cwd: process.cwd(),
     env: SERVER_ENV,
   });

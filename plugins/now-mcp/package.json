@@ -1,7 +1,7 @@
 {
   "name": "now-mcp",
   "version": "1.0.2",
-  "description": "now-mcp — Fluent-native Model Context Protocol server for ServiceNow. Gives Claude live read/observe + data tools; pairs with the ServiceNow Fluent SDK CLI (now-sdk) driven by Claude Code.",
+  "description": "Fluent-native Model Context Protocol server for ServiceNow runtime data, schema, scripts, attachments, and diagnostics.",
   "type": "module",
   "repository": {
     "type": "git",
@@ -30,7 +30,7 @@
     "servicenow",
     "fluent",
     "now-sdk",
-    "claude",
+    "agent-plugin",
     "ai",
     "integration"
   ],

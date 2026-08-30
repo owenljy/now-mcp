@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "now-mcp": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/launch.mjs"],
+      "cwd": "${CLAUDE_PLUGIN_ROOT}",
+      "env": {
+        "SERVICENOW_CONFIG_PATH": "${user_config.config_path}",
+        "SERVICENOW_URL": "${user_config.instance_url}",
+        "SERVICENOW_USERNAME": "${user_config.username}",
+        "SERVICENOW_PASSWORD": "${user_config.password}",
+        "SERVICENOW_READ_ONLY": "${user_config.read_only}"
+      }
+    }
+  }
+}

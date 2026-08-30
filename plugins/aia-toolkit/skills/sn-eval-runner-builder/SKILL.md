@@ -1,8 +1,6 @@
 ---
 name: sn-eval-runner-builder
 description: Sets up the full ServiceNow platform eval pipeline for AI agents — publishes a version, creates an isolated eval team, and generates a Script Include eval runner (Auto Chat, no UI wizard). Also diagnoses failed eval runs — null results, stuck runs, NA metric scores. Trigger on phrases like "set up eval", "platform eval", "eval setup", "publish version for eval", "eval runner", "run evals in code", "background script eval", "programmatic eval", "NowAssistSkillKitAPI", "Auto Chat eval", "eval failed", "debug eval", "eval broken", "null results", "zero traces".
-argument-hint: "[agent name]"
-effort: high
 ---
 
 # ServiceNow Eval Runner Builder
@@ -13,12 +11,12 @@ Supports two deployment paths:
 - **Fluent (now-sdk):** Generate `.now.ts` + `.server.js` files, deploy with `pnpm run build:install`
 - **Platform UI:** Create records directly in ServiceNow
 
-> **Prerequisite — check before proceeding:** If deploying via now-sdk (fluent records), check `package.json` for `@servicenow/sdk` before generating files. If it's missing, **tell the user explicitly** and offer the Platform UI path instead. Also resolve `read_records` / `run_privileged_script` against whatever MCP is connected (see [../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md)); if nothing matches, tell the user before falling back to background scripts.
+> **Prerequisite — check before proceeding:** If deploying via now-sdk (fluent records), check `package.json` for `@servicenow/sdk` before generating files. If it's missing, **tell the user explicitly** and offer the Platform UI path instead. Also resolve `read_records` / `run_privileged_script` against whatever MCP is connected (see [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)); if nothing matches, tell the user before falling back to background scripts.
 
 > **Instance safety gate — check before any write.** This skill writes real records (published version, eval team, script include, then eval runs/datasets/metric results) directly to whatever instance now-sdk/MCP are currently connected to — the two-scope separation below only protects a *packaged* customer install, it does nothing if you're live-connected to a customer's production tenant. Before Phase 0:
 > 1. Resolve the connected target: call `sn_sdk_status` if the MCP exposes it (or inspect the active now-sdk profile / `now.config.json`), and state the resolved instance name/host to the user.
 > 2. If resolution fails, or the name/host looks like a customer or production tenant, stop and ask the user to explicitly confirm this instance is intended before proceeding. Do not proceed silently.
-> 3. **Prefer dry-run/mock over real side-effects.** If the agent's state-mutating tools support the config-driven dry-run/mock guard (builder Step 4 / [../docs/tool-output-patterns.md → Run-level terminal outcomes](../docs/tool-output-patterns.md)), enable it for the eval run — it exercises the full real tool path on the instance without the irreversible writes, far safer than pointing eval at production writes. **Fidelity caveat:** a dry-run/mock eval covers tool selection and the pre-mutation path but NOT the real side-effect, so a mutating agent still needs one non-dry-run validation in a safe (non-prod) sandbox before go-live.
+> 3. **Prefer dry-run/mock over real side-effects.** If the agent's state-mutating tools support the config-driven dry-run/mock guard (builder Step 4 / [../../references/tool-output-patterns.md → Run-level terminal outcomes](../../references/tool-output-patterns.md)), enable it for the eval run — it exercises the full real tool path on the instance without the irreversible writes, far safer than pointing eval at production writes. **Fidelity caveat:** a dry-run/mock eval covers tool selection and the pre-mutation path but NOT the real side-effect, so a mutating agent still needs one non-dry-run validation in a safe (non-prod) sandbox before go-live.
 
 ---
 
@@ -60,7 +58,7 @@ Record({
 
 An isolated one-agent team prevents context leakage from production team configurations. The runner resolves the team via the usecase's `team` field — if that points at a production team containing other agents, Auto Chat picks up irrelevant context and scores are meaningless.
 
-> **Why `Record()` here and not `AiAgenticWorkflow()`?** This adds a standalone team to an *already-deployed* agent and points an existing usecase's `team` field at it — a targeted modification the regenerate-everything typed API can't express piecemeal. That's the one legitimate `Record({ table: 'sn_aia_*' })` gap (CLAUDE.md M6).
+> **Why `Record()` here and not `AiAgenticWorkflow()`?** This adds a standalone team to an *already-deployed* agent and points an existing usecase's `team` field at it — a targeted modification the regenerate-everything typed API can't express piecemeal. That's the one legitimate `Record({ table: 'sn_aia_*' })` gap in the Fluent metadata rules.
 
 **a. Eval team:**
 ```ts
@@ -111,7 +109,7 @@ Record({
 
 Check whether `sys_one_extend_eval_strategy_metric` files already exist in `src/fluent/`. If so, skip. Otherwise generate under the scope path from above.
 
-> **Verify these platform sys_ids against your instance before deploying** — they can differ by release. Confirm with: `now-sdk query sys_one_extend_eval_strategy_metric -q metric_nameLIKECorrectness -o json` or by resolving the `read_records` capability (see [../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md)).
+> **Verify these platform sys_ids against your instance before deploying** — they can differ by release. Confirm with: `now-sdk query sys_one_extend_eval_strategy_metric -q metric_nameLIKECorrectness -o json` or by resolving the `read_records` capability (see [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)).
 
 ```ts
 // eval-metric-faithfulness.now.ts

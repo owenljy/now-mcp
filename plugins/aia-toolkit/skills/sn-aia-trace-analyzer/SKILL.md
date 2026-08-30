@@ -1,22 +1,17 @@
 ---
 name: sn-aia-trace-analyzer
 description: Analyzes AI Agent execution traces, spans, and logs on a ServiceNow instance to diagnose runtime failures, wrong answers, slow runs, stuck executions, and "phantom success" (a tool reports success but returned empty/undefined output). Walks the execution plan → tasks → tool calls → LLM logs → performance events chain. Includes GAIC error code interpretation, Rhino tool-script error-signature detection, performance metrics computation, and structured diagnostic checklists. Can also trigger a test run to populate tracing tables. Use after an agent is deployed and running. Trigger on phrases like "trace analysis", "analyze agent run", "why did the agent fail", "agent gave wrong answer", "agent returned empty/blank/placeholder data", "tool succeeded but no data", "agent is slow", "debug agent run", "execution trace", "inspect spans", "root cause analysis", "agent runtime issue", "what went wrong", "analyze execution plan", "GAIC error", "error code", "LLM error".
-argument-hint: "[execution-plan-sys-id] [symptom / what went wrong]"
-context: fork
-agent: general-purpose
 ---
 
 # ServiceNow AI Agent Trace Analyzer
 
 Diagnoses runtime issues with deployed AI Agents by walking the execution trace — the layered trail of records the platform writes for every agent run. This is the skill to use when the agent is deployed and running but producing wrong answers, failing, running slow, or behaving unexpectedly.
 
-> **This skill runs in an isolated subagent (`context: fork`) — it has no access to the conversation that invoked it.** Whatever prompted this analysis (an execution plan sys_id, the agent's name, what the user said was wrong) only reaches this skill through `$ARGUMENTS`. If invoked by Claude rather than the user directly, the invoking turn must summarize the relevant context into the args string.
-
-**Given context:** $ARGUMENTS
+Use the current request and conversation as the diagnostic context, including any execution-plan sys_id, agent name, symptom, and expected behavior already provided.
 
 > **Not for eval infrastructure issues.** If your problem is "eval run produced null results" or "Auto Chat didn't start," use `/sn-eval-runner-builder` instead. This skill is for "the agent ran but did something wrong."
 
-> **Prerequisite:** The agent must have been invoked at least once so tracing records exist. If no execution plan exists yet, this skill can trigger a test run first (Phase 1). This skill reads via the `read_records` capability, resolved against whatever MCP is connected (see [../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md)); if nothing matches, **tell the user explicitly** before falling back to the background scripts in [references/background-scripts.md](references/background-scripts.md).
+> **Prerequisite:** The agent must have been invoked at least once so tracing records exist. If no execution plan exists yet, this skill can trigger a test run first (Phase 1). This skill reads via the `read_records` capability, resolved against whatever MCP is connected (see [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)); if nothing matches, **tell the user explicitly** before falling back to the background scripts in [references/background-scripts.md](references/background-scripts.md).
 
 ---
 
@@ -55,7 +50,7 @@ Proceed directly to Phase 2.
 > (`tableName` string, `query` encoded string, `fields` **array** of strings,
 > `limit`) from the `servicenow` MCP's `sn_query_records` tool.
 > Resolve `read_records` per
-> [`../docs/mcp-capability-resolution.md`](../docs/mcp-capability-resolution.md)
+> [`../../references/mcp-capability-resolution.md`](../../references/mcp-capability-resolution.md)
 > against whatever MCP is actually connected, and adapt these param names to
 > its real schema. Field names below are the **real `sn_aia_*` DB columns** —
 > verified against the live instance via `now-sdk query` and re-checkable with
@@ -109,7 +104,7 @@ For each step: resolve `read_records` and run the query in
 interpretation table there. If no MCP tool resolves, use the matching background script in
 [`references/background-scripts.md`](references/background-scripts.md) instead.
 
-> **On `GlideRecord` vs `GlideRecordSecure`:** the background scripts are **read-only diagnostics** run interactively by an admin in Scripts > Background — they intentionally use plain `GlideRecord` to see all trace records regardless of ACLs. This is the opposite of the tool-script rule (`CLAUDE.md` mandates `GlideRecordSecure` for deployed tool scripts because those run as the agent's user). Do not "fix" these diagnostic scripts to `GlideRecordSecure` — that would hide records you need to see.
+> **On `GlideRecord` vs `GlideRecordSecure`:** the background scripts are **read-only diagnostics** run interactively by an admin in Scripts > Background — they intentionally use plain `GlideRecord` to see all trace records regardless of ACLs. Deployed tool scripts must use `GlideRecordSecure` because they run as the agent's user. Do not "fix" these diagnostic scripts to `GlideRecordSecure` — that would hide records you need to see.
 
 | Step | Table | What it tells you |
 |---|---|---|
@@ -208,7 +203,7 @@ Once you've identified the symptom, classify the root cause:
 | **Prompt / Instructions** | LLM log shows wrong/missing instructions, variables not resolved | Agent instructions, role, or prompt config |
 | **Tool Wiring** | Tool list empty in LLM prompt, or tool not found errors | Agent-tool M2M records (`sn_aia_agent_tool_m2m`) |
 | **Tool Script Error** | Tool execution has `error_message`, script threw exception | Tool script code |
-| **Rhino Module Syntax** | `error_message` or syslog contains `"exports" is not defined`, `require is not defined`, or `RhinoEcmaError … .script : Line(N)` | Tool script used `import`/`export`/`require` or a compiled `dist/` bundle. Rewrite as a plain-JS IIFE per the Runtime Contract (`/sn-aia-agent-builder`, `CLAUDE.md` PLAIN-JS IIFE blocker) |
+| **Rhino Module Syntax** | `error_message` or syslog contains `"exports" is not defined`, `require is not defined`, or `RhinoEcmaError … .script : Line(N)` | Tool script used `import`/`export`/`require` or a compiled `dist/` bundle. Rewrite as a plain-JS IIFE per the Runtime Contract and `sn-aia-agent-builder` skill. |
 | **Phantom Success** | Tool `execution_status = completed` but `response` empty/`undefined`/`{}`; LLM then fabricates or emits placeholders | Tool script doesn't `return` on every path (often a bare `export function` that is never invoked). Rewrite as a plain-JS IIFE that returns a value on success AND error |
 | **ACL / Permission** | `access_verification` task failed, `security_violation` state_reason | ACL rules, role assignments, `runAsUser` config |
 | **Data Quality** | Tool returns stale/wrong data, GlideRecord returns no results | Source data on the instance |

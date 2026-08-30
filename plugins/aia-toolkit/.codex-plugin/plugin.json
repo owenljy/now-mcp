@@ -1,0 +1,20 @@
+{
+  "name": "aia-toolkit",
+  "version": "1.0.0",
+  "description": "ServiceNow AI Agent lifecycle skills for building, auditing, evaluating, and tracing agents.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["servicenow", "ai-agent", "fluent", "now-sdk", "eval"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ServiceNow AI Agent Toolkit",
+    "shortDescription": "Build, audit, evaluate, and trace ServiceNow AI agents.",
+    "longDescription": "Portable workflows for the full ServiceNow AI Agent lifecycle, designed to pair with now-mcp for live-instance operations.",
+    "developerName": "Owen Liang",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "Help me build or diagnose a ServiceNow AI Agent."
+  }
+}

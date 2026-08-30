@@ -1,0 +1,44 @@
+{
+  "name": "foundry-suite",
+  "interface": {
+    "displayName": "Foundry Suite"
+  },
+  "plugins": [
+    {
+      "name": "now-mcp",
+      "source": {
+        "source": "local",
+        "path": "./plugins/now-mcp"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "aia-toolkit",
+      "source": {
+        "source": "local",
+        "path": "./plugins/aia-toolkit"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    },
+    {
+      "name": "sn-poc",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sn-poc"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

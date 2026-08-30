@@ -1,8 +1,6 @@
 ---
 name: sn-aia-a2a-setup
 description: Exposes a ServiceNow AI Agent Studio agent as a secondary Agent2Agent (A2A) server so an external orchestrator (Microsoft Copilot Studio, Google A2A clients, Postman/Bruno) can discover and invoke it. Covers the full OAuth Application Registry + CORS + Inbound Auth Profile + sync-channel wiring that the OOB flow leaves broken, plus a symptom-indexed troubleshooting reference built from a real debugging session. Trigger on "expose agent via A2A", "Agent2Agent", "secondary agent", "connect Copilot Studio to ServiceNow", "A2A agent card", "invalid_scope", "Missing redirect URL in application registration", "couldn't find an agent card at this URL", "connectorRequestFailure", "Push Notification URL is required for asynchronous requests", "OAuth2LoginStrategyCore failed to exchange code for access token".
-argument-hint: "[agent name or sys_id] [external orchestrator, e.g. Copilot Studio]"
-effort: high
 ---
 
 # ServiceNow AI Agent — A2A Secondary-Agent Setup
@@ -28,7 +26,7 @@ that.)
 > `sn_aia_*`, `oauth_*`, `sys_auth_*`, `sys_api_access_*`, `sys_cs_channel`, and
 > `sys_cors_rule` records, and runs ad-hoc background scripts to read
 > `syslog`/`syslog_transaction`. Resolve against whatever MCP is connected using
-> the same protocol as [../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md)
+> the same protocol as [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)
 > (`read_records`, `run_privileged_script`), plus a **`write_records`**
 > capability on the same pattern (create/update by table+fields; reference
 > shape: `sn_create_records`/`sn_update_records` on the `now-mcp` plugin). If no

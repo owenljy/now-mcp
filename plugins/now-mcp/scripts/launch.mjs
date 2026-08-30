@@ -2,8 +2,8 @@
 /**
  * now-mcp plugin launcher — MCP entry point.
  *
- * Claude Code runs this as the plugin's MCP server `command`. Dependency setup
- * (install into ${CLAUDE_PLUGIN_DATA}, symlink node_modules) lives in the shared,
+ * Agent hosts run this as the plugin's MCP server `command`. Dependency setup
+ * (install into ${PLUGIN_DATA}, symlink node_modules) lives in the shared,
  * idempotent scripts/ensure-deps.mjs, which the SessionStart hook runs first so
  * a first-run install doesn't block the MCP handshake. We call ensureDeps() here
  * too as a fallback — if the hook didn't run or finished late, the server still
@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureDeps, pnpmInvocation } from './ensure-deps.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const root = process.env.CLAUDE_PLUGIN_ROOT || join(scriptDir, '..');
+const root = process.env.PLUGIN_ROOT || join(scriptDir, '..');
 
 function fail(msg) {
   console.error(`[now-mcp launcher] ERROR: ${msg}`);

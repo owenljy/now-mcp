@@ -58,7 +58,7 @@ The async BR that generates the backing flow fires on **insert** of `sn_aia_trig
 })();
 ```
 
-> Verify column names (`operation`, etc.) against `sys_dictionary` for your release before running — see the column-name guardrail in `CLAUDE.md`.
+> Verify column names (`operation`, etc.) against `sys_dictionary` for your release before running; do not rely on remembered schema.
 
 ---
 

@@ -34,7 +34,7 @@ docs. (The repo is public, so no auth is needed for content fetches — only for
 - Type `/sn-docs-search` and describe what you need, **including the task you're solving**
   (not just the topic) — e.g. *"what does ServiceNow natively offer for MCP, so I can decide
   how it fits external MCP tooling?"*. The skill extracts with your task in mind.
-- Or just ask a ServiceNow-docs question in chat and Claude may invoke it automatically.
+- Or ask a ServiceNow-docs question in chat and the agent may invoke it automatically.
 
 ### What you get back
 

@@ -1,7 +1,7 @@
 ---
 name: sn-dependency-graph
 description: Read-only `sn_execute_background_script` templates that compute what runs on a table (business rules, client scripts, UI policies, extends chain) or who references a script include/other target — computed server-side in one call, with results cached locally and timestamped so repeat questions don't re-hit the instance. Use for impact-analysis questions like "what runs on this table", "who calls this script include", "what depends on X" before changing something.
-allowed-tools: Read, Write, Bash, mcp__plugin_now-mcp_now-mcp__sn_execute_background_script
+allowed-tools: Read Write Bash mcp__plugin_now-mcp_now-mcp__sn_execute_background_script
 ---
 
 # ServiceNow Dependency/Reference Templates
@@ -51,7 +51,7 @@ macros).
 
 ## Cache
 
-Path: `~/.claude/sn-graph-cache/<instance>/<query-type>/<target>.json`
+Path: `~/.cache/now-mcp/sn-graph-cache/<instance>/<query-type>/<target>.json`
 
 - `<instance>` — exactly the `instance` string `sn_execute_background_script`'s
   response echoes back (`"default"` if the call didn't pass one).

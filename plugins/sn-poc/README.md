@@ -1,6 +1,6 @@
 # sn-poc
 
-Claude Code skills that take a ServiceNow PoC — starting from whatever project
+Portable Agent Skills that take a ServiceNow PoC — starting from whatever project
 context already exists (call notes, sales threads, transcripts) or a rough
 description you give it — to engineering-ready implementation stories. Part of
 the [`foundry-suite`](../../README.md) marketplace; Phase B of the spec skill
@@ -48,13 +48,8 @@ phase, or want to understand what each phase actually produces.
 
 ## Installation
 
-Install from the `foundry-suite` marketplace:
-
-```
-/plugin marketplace add <REPO_URL>
-/plugin install sn-poc@foundry-suite
-/reload-plugins
-```
+Follow the Claude, Codex, or Cursor instructions in the suite
+[README](../../README.md#install).
 
 `sn-poc` is **skills-only** — no setup form, no connection details of its own.
 
@@ -112,7 +107,7 @@ embeds a `#structured-data` JSON block that the next phase reads directly, and
 has an Export Markdown button for pulling content out as text/git-friendly
 `.md`. Planning's stories are the exception: plain Markdown files under
 `./intake-docs/planning/stories/`, written to be tool-agnostic — no mention of
-Claude, MCP, or any specific tool — so any engineer can pick them up.
+an AI host, MCP, or any specific tool — so any engineer can pick them up.
 
 ## Standards reference
 

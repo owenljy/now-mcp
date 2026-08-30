@@ -7,21 +7,21 @@
  * repeatedly: when everything is already in place it is a fast no-op.
  *
  * Called from two places:
- *   - hooks/hooks.json (SessionStart) — runs BEFORE the MCP server starts, so
+ *   - a host adapter hook (when supported) — runs before the MCP server starts
  *     first-run installation doesn't block/timeout the MCP handshake.
  *   - scripts/launch.mjs — calls this as a fallback right before starting the
  *     server, in case the hook didn't run or finished after the server started.
  *
- * Strategy (see also the plugins reference on CLAUDE_PLUGIN_ROOT vs _DATA):
- *   - Install into ${CLAUDE_PLUGIN_DATA} (PERSISTENT across plugin updates).
- *     ${CLAUDE_PLUGIN_ROOT} is ephemeral (new dir per version/commit), so
+ * Strategy (Agent Plugins ${PLUGIN_ROOT}/${PLUGIN_DATA}):
+ *   - Install into ${PLUGIN_DATA} (PERSISTENT across plugin updates).
+ *     ${PLUGIN_ROOT} is ephemeral (new dir per version/commit), so
  *     installing there re-installs on every update.
  *   - Symlink ROOT/node_modules -> DATA/node_modules. Node's ESM resolver walks
  *     the directory tree and ignores NODE_PATH, so a symlink (not NODE_PATH,
  *     which is CommonJS-only) is how ESM finds the deps.
  *   - Skip install unless package.json / pnpm-lock.yaml differ from the copies
  *     cached in DATA, so update-with-no-dep-change is instant.
- *   - When CLAUDE_PLUGIN_DATA is unset (dev checkout), install in place in ROOT.
+ *   - When PLUGIN_DATA is unset (dev checkout), install in place in ROOT.
  *
  * Output goes to stderr. As a plain command hook its stdout is harmless, but the
  * launcher imports run() where stdout MUST stay clean for the MCP stream, so we
@@ -140,8 +140,8 @@ function ensureSymlink(linkPath, target) {
  */
 export function ensureDeps() {
   const scriptDir = dirname(fileURLToPath(import.meta.url));
-  const root = process.env.CLAUDE_PLUGIN_ROOT || join(scriptDir, '..');
-  const dataDir = process.env.CLAUDE_PLUGIN_DATA || null;
+  const root = process.env.PLUGIN_ROOT || join(scriptDir, '..');
+  const dataDir = process.env.PLUGIN_DATA || null;
 
   if (dataDir) {
     // Persistent-deps mode (real plugin runtime).

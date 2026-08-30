@@ -7,7 +7,7 @@ MCP call; only reach for the matching script below when MCP isn't available. Pas
 
 > **Plain `GlideRecord`, not `GlideRecordSecure`, is intentional here.** These are read-only
 > diagnostics run interactively by an admin — they need to see all trace records regardless of
-> ACLs. This is the opposite of the tool-script rule (`CLAUDE.md` mandates `GlideRecordSecure`
+> ACLs. This is the opposite of the deployed tool-script rule (`GlideRecordSecure`
 > for deployed tool scripts because those run as the agent's user). Do not "fix" these scripts
 > to `GlideRecordSecure` — that would hide records you need to see.
 

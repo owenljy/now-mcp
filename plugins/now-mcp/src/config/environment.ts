@@ -266,8 +266,8 @@ export function resolveNowSdkFollow(
 }
 
 /** Read an env var, treating whitespace-only (and unset) as absent.
- * Plugin `${user_config.X}` substitution yields an empty string when a field is
- * left blank, so empty must mean "not provided" the same as unset. */
+ * Plugin setup forms may substitute an empty string when a field is left blank,
+ * so empty must mean "not provided" the same as unset. */
 function envValue(name: string): string | undefined {
 	const v = process.env[name];
 	if (v === undefined) return undefined;
@@ -277,15 +277,13 @@ function envValue(name: string): string | undefined {
 
 /**
  * The single-instance FAST PATH: build one basic-auth instance straight from
- * environment variables, no YAML file required. This is what the Claude Code
- * plugin form feeds (SERVICENOW_URL / _USERNAME / _PASSWORD / _READ_ONLY), so a
- * single-instance user never has to create a file or type a path, and the
- * password lives in the OS keychain (via the plugin's `sensitive` option) rather
- * than plaintext on disk.
+ * environment variables, no YAML file required. Host setup forms can feed
+ * SERVICENOW_URL / _USERNAME / _PASSWORD / _READ_ONLY, so a single-instance
+ * user never has to create a file or type a path.
  *
  * Scope is deliberately narrow — basic auth, one instance. OAuth and
- * multi-instance setups stay in YAML (see the docs), because userConfig can't
- * express an instance array and the keychain has a ~2KB budget.
+ * multi-instance setups stay in YAML (see the docs), because the portable
+ * environment-variable interface does not express an instance array.
  *
  * @returns the Environment when SERVICENOW_URL is set, or null when no fast-path
  *   var is present (so the caller falls through to the YAML lookup).
@@ -433,8 +431,8 @@ export function loadConfig(): Environment {
 	//
 	// We distinguish three states per var:
 	//   "not set"      — process.env has no entry (plugin not installed / env not passed)
-	//   "set but empty" — plugin form installed but field left blank; ${user_config.X}
-	//                     substitution yields "" which envValue() treats as absent
+	//   "set but empty" — plugin form installed but field left blank; an empty
+	//                     substitution is treated as absent by envValue()
 	//   "set"          — a non-empty value reached us
 	function varStatus(name: string, redact = false): string {
 		const raw = process.env[name];

@@ -28,11 +28,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Validate Agent Plugin, Claude, Codex, and Cursor packages
+        working-directory: ${{ github.workspace }}
+        run: node scripts/validate-plugins.mjs
+
       - name: Build
         run: pnpm build
 
       - name: Lint
         run: pnpm exec biome ci src
+
+      - name: MCP initialize and list-tools smoke test
+        run: node --test test/protocol-contract.test.js
 
       - name: Test
         run: pnpm test

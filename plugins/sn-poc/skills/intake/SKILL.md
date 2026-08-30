@@ -1,16 +1,13 @@
 ---
 name: intake
-description: Full PoC intake pipeline — takes a raw PoC idea all the way through discovery, spec, and planning in one flow. Auto-detects where the PoC currently stands and resumes from the right phase. Use this as the single entry point; run the individual phase skills (discover/spec/planning) only to re-enter a specific phase mid-flow.
-argument-hint: <PoC idea>
-context: fork
-agent: pipeline-agent
+description: Run the full ServiceNow PoC intake pipeline from raw idea through discovery, specification, and planning. Use as the main entry point or to resume an existing intake from its current phase.
 ---
 
 # PoC Intake
 
-$ARGUMENTS
+Read `../../agents/pipeline-agent.md` in full and follow it exactly. It is the single source of truth for phase detection, approval gates, referenced workflows, and completion criteria.
 
-If no input was provided above, check `./intake-docs/` for existing progress first. If nothing exists yet, ask the user: "What PoC are you working on? Give me a rough idea — even a sentence is enough to start."
+Use the PoC idea in the current request and conversation. If none was provided, check `./intake-docs/` for existing progress first. If nothing exists yet, ask: "What PoC are you working on? Give me a rough idea — even a sentence is enough to start."
 
 ## How this works
 
@@ -24,4 +21,4 @@ Each phase gates on the previous one. You will be prompted before crossing each 
 
 **Resuming mid-flow:** the pipeline detects what already exists in `./intake-docs/` and picks up from the right phase automatically.
 
-**Re-entering a specific phase:** use `/sn-poc:discover`, `/sn-poc:spec`, or `/sn-poc:planning` directly.
+**Re-entering a specific phase:** invoke the `discover`, `spec`, or `planning` skill directly.

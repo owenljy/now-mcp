@@ -14,7 +14,7 @@
  * `$FLUENT_WORKFLOW_TEMPLATE` points at), so it can be maintained without
  * editing code. This script only handles placement and idempotency.
  *
- * Wired in `hooks/hooks.json` as a SessionStart hook. That means it runs on
+ * Wired only by the Claude adapter in `hooks/claude.json`. That means it runs on
  * EVERY session start, so it MUST be fast and MUST be a no-op when the rule is
  * already current. It is idempotent by design: a versioned fenced anchor block
  * is replaced when the shipped workflow changes, then left untouched thereafter.

@@ -2,8 +2,7 @@
 #
 # anti-pattern-scan.sh — single source of truth for the AI-agent anti-pattern scan.
 #
-# Invoked by both CLAUDE.md ("Anti-Pattern Scan" section) and
-# sn-aia-agent-builder/SKILL.md (Step 7b). Do not paste these checks elsewhere —
+# Invoked by sn-aia-agent-builder/SKILL.md (Step 7b). Do not paste these checks elsewhere —
 # point at this script so the check list cannot drift.
 #
 # Checks (all "MUST be zero" hits are build/runtime blockers): [1] plain GlideRecord,
@@ -36,7 +35,7 @@ echo "=== Anti-pattern scan (root: $SCAN_ROOT) ==="
 
 # Every rg-based check below treats "zero matches" as the success case, so a MISSING
 # `rg` would make those checks print nothing and the whole scan exit 0 — a false all-clear.
-# Abort loudly instead. (In Claude Code's interactive shell `rg` may be a shell function;
+# Abort loudly instead. (In an interactive host shell `rg` may be a shell function;
 # in a plain bash/CI shell it must be a real ripgrep binary on PATH.)
 if ! command -v rg >/dev/null 2>&1; then
   echo "ERROR: ripgrep ('rg') is not on PATH. This scan relies on rg for nearly every check;" >&2

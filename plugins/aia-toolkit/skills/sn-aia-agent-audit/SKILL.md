@@ -1,17 +1,13 @@
 ---
 name: sn-aia-agent-audit
 description: Audits existing ServiceNow AI agents against best practices — checks for plain GlideRecord usage, missing max_auto_executions, wrong enums, oversized tool counts, missing processing messages, and reserved tool names. Use to validate agents before deployment or review agents already on an instance. Trigger on phrases like "audit agent", "check agent quality", "agent best practices", "validate agent", "agent health check", "review agent config".
-argument-hint: "[agent-name-or-sys_id | all | path-to-fluent-dir]"
-context: fork
-agent: general-purpose
-model: haiku
 ---
 
 # ServiceNow AI Agent Audit
 
 Audits existing AI agents against the deployment guardrails and best practices — catches blockers before they cause runtime failures.
 
-> **Prerequisite — check before proceeding:** This skill queries a live ServiceNow instance to inspect agent records, resolving the `read_records` capability against whatever MCP is connected (see [../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md)). If no matching tool is found, **tell the user explicitly** ("No ServiceNow MCP connected — I'll give you a background script to run manually instead") before switching to the background-script fallback. It can also audit local fluent files if you point it at a directory, which needs neither MCP nor now-sdk.
+> **Prerequisite — check before proceeding:** This skill queries a live ServiceNow instance to inspect agent records, resolving the `read_records` capability against whatever MCP is connected (see [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)). If no matching tool is found, **tell the user explicitly** ("No ServiceNow MCP connected — I'll give you a background script to run manually instead") before switching to the background-script fallback. It can also audit local fluent files if you point it at a directory, which needs neither MCP nor now-sdk.
 
 ---
 
@@ -27,7 +23,7 @@ Audits existing AI agents against the deployment guardrails and best practices �
 
 ## Step 1: Identify the Target
 
-**This skill runs in an isolated subagent (`context: fork`) — it has no access to the conversation that invoked it.** Given context: $ARGUMENTS. If that already names a target (agent name/sys_id, "all", or a fluent directory path), use it and skip the question below.
+Use the current request and conversation to identify the target. If they already name an agent, sys_id, "all", or a Fluent directory, use it and skip the question below.
 
 Otherwise ask: **What would you like to audit?** (one at a time)
 
@@ -44,7 +40,7 @@ If auditing a specific agent, ask: **Name or sys_id?**
 ### Instance audit — resolve `read_records`
 
 Resolve the `read_records` capability (see
-[../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md))
+[../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md))
 and run these queries **in parallel**. Params below (`tableName` string,
 `query` encoded string, `fields` **array**, `limit`) are the illustrative
 shape from the `servicenow` MCP's `sn_query_records` tool — adapt to
@@ -336,7 +332,7 @@ Apply all checks from the checklist below. For instance audits, the checks run a
 | W6 | **Missing RULES preamble** | Agent instructions don't start with RULE 1-7 block | Add the standard RULES preamble from the prompting best practices. |
 | W7 | **No published version** | No `sn_aia_version` record with `state: 'published'` for this agent | Run `/sn-eval-runner-builder` (Phase 0.1) to publish. |
 | W8 | **State-mutating agent without an independent verify step** | Agent has a mutating/deploy tool (writes a record, deploys, calls an external write API) but its instructions declare no `# Verify` step before success | Add a `# Verify` step (independent read of the mutation's end-state; inconclusive-on-read-error → re-check/escalate). See builder instructions template. |
-| W9 | **No honest terminal/escalate branch** | Instructions never define an `escalated`/handoff terminal outcome — a genuinely-stuck run has no labeled exit | Add an explicit escalate branch (`# Outcome`) that hands off to a named queue with the full trail. See [../docs/tool-output-patterns.md → Run-level terminal outcomes](../docs/tool-output-patterns.md). |
+| W9 | **No honest terminal/escalate branch** | Instructions never define an `escalated`/handoff terminal outcome — a genuinely-stuck run has no labeled exit | Add an explicit escalate branch (`# Outcome`) that hands off to a named queue with the full trail. See [../../references/tool-output-patterns.md → Run-level terminal outcomes](../../references/tool-output-patterns.md). |
 | W10 | **Hardcoded customer/environment value in a server script** | A literal endpoint URL, or **non-hex** config baked in (threshold values, MID/group names, software/serial strings), in a server script outside the connection-resolution helper. *(The hardcoded-hex-sys_id case is owned by scan check [12] — W10 defers to it, don't double-report.)* | Externalize to a system property (`gs.getProperty` + safe default) or a connection alias (builder rule A4). |
 | W11 | **State-mutating tool with no dry-run/mock guard** | A tool that mutates (`.update()`, `.insert()`, `.setValue(`, or `setHttpMethod('POST'\|'PUT'\|'PATCH'\|'DELETE')`) with NO preceding `gs.getProperty(...dry_run...)` / mock short-circuit — so it can't be run safely in eval | Add the config-driven dry-run/mock guard from the tool-script templates (see builder Step 4). |
 

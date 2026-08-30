@@ -1,25 +1,18 @@
 ---
 name: discover
-description: Pre-meeting discovery — challenge a PoC idea, generate customer meeting questions, anticipate end-user FAQ, and produce a customer-ready brief. Triggers on "/sn-poc:discover", "discover this PoC", "prep for customer meeting".
-argument-hint: <PoC idea or description>
-context: fork
-agent: discovery-agent
+description: Challenge a ServiceNow PoC idea, generate customer meeting questions, anticipate end-user FAQ, and produce a customer-ready discovery brief. Use when preparing PoC discovery or a customer meeting.
 ---
 
 # Discover
 
-Prepare for the customer meeting on this PoC idea:
-
-$ARGUMENTS
-
-If no PoC idea was provided above, ask the user: "What PoC are you planning to discuss with the customer? Give me a rough description — even a sentence is enough to start."
+Use the PoC idea in the current request and conversation. If none was provided, ask: "What PoC are you planning to discuss with the customer? Give me a rough description — even a sentence is enough to start."
 
 ## How this skill works
 
-This skill runs two agents in sequence:
+Read and follow two workflow files in sequence:
 
-1. **discovery-agent** — challenges the idea, surfaces weak assumptions, and generates structured questions for the customer meeting. Produces `discovery-brief.md`.
+1. Read `../../agents/discovery-agent.md` in full and follow it exactly. It challenges the idea, surfaces weak assumptions, and produces `discovery-brief.md`.
 
-2. **faq-agent** — anticipates questions end users will ask, writes draft answers, and produces a customer-facing brief. Produces `index.html` (the only output file — no separate `.md` files).
+2. After the user approves the discovery brief, read `../../agents/faq-agent.md` in full and follow it exactly. It anticipates end-user questions and produces `index.html`.
 
-The faq-agent runs automatically after the discovery-agent completes and the user approves the discovery brief.
+Do not start the second workflow before the approval gate.

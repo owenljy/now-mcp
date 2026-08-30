@@ -1,0 +1,41 @@
+{
+  "name": "now-mcp",
+  "version": "1.0.2",
+  "description": "Fluent-native ServiceNow MCP server with runtime data, schema, script, attachment, and diagnostic tools.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["mcp", "servicenow", "fluent", "now-sdk"],
+  "skills": "./skills/",
+  "mcpServers": "./mcp.cursor.json",
+  "variables": {
+    "type": "object",
+    "properties": {
+      "SERVICENOW_CONFIG_PATH": {
+        "type": "string",
+        "title": "Config file",
+        "description": "Absolute path to a YAML config. Use this for OAuth or multiple instances."
+      },
+      "SERVICENOW_URL": {
+        "type": "string",
+        "title": "Instance URL",
+        "description": "ServiceNow instance URL for single-instance basic auth."
+      },
+      "SERVICENOW_USERNAME": {
+        "type": "string",
+        "title": "Username"
+      },
+      "SERVICENOW_PASSWORD": {
+        "type": "string",
+        "title": "Password"
+      },
+      "SERVICENOW_READ_ONLY": {
+        "type": "string",
+        "title": "Read only",
+        "description": "Leave true for safe read-only access; set false to allow writes.",
+        "default": "true"
+      }
+    }
+  }
+}

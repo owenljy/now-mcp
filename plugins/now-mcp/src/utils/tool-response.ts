@@ -31,9 +31,9 @@ interface StructuredToolResult {
  * Build a success result whose full data lives ONLY in `structuredContent`,
  * while the text block carries a short human summary.
  *
- * NOTHING LOAD-BEARING MAY LIVE IN THE TEXT BLOCK. Measured against Claude
- * Code: when a result carries `structuredContent`, the client delivers that
- * alone and the text blocks never reach the model — the same call with no
+ * NOTHING LOAD-BEARING MAY LIVE IN THE TEXT BLOCK. Some MCP clients deliver
+ * only `structuredContent` to the model when it is present, so text blocks may
+ * never reach the model — the same call with no
  * `structuredContent` (e.g. the CI write-routing refusal) does deliver its
  * text. So a truncation note or a recovery hint emitted as a text block is
  * simply lost, and silently: a truncated result reads as a complete one.

@@ -1,0 +1,20 @@
+{
+  "name": "sn-poc",
+  "version": "1.0.0",
+  "description": "ServiceNow PoC discovery, specification, and implementation-planning skills.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["servicenow", "poc", "discovery", "spec", "planning", "now-sdk"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ServiceNow PoC",
+    "shortDescription": "Take a ServiceNow PoC from idea to implementation plan.",
+    "longDescription": "A gated workflow for discovery, customer-ready specifications, technical design, and implementation-ready stories.",
+    "developerName": "Owen Liang",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "Help me scope and plan a ServiceNow PoC."
+  }
+}

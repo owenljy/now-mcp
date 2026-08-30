@@ -62,7 +62,7 @@ capability:
 4. **Adapt params.** Once a tool is chosen, read its actual input schema and
    map the capability's generic fields onto that tool's real param names (e.g.
    `tableName` vs `table`, `query` vs `filter`). This isn't new machinery —
-   it's the same schema-driven param mapping Claude does for any tool call;
+   it's the same schema-driven param mapping an agent does for any tool call;
    the protocol only decides *which* tool to call.
 5. **Cache for the run.** Reuse the same tool + mapping for the rest of that
    skill invocation. Don't re-run discovery per call.

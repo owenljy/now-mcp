@@ -1,0 +1,11 @@
+{
+  "name": "aia-toolkit",
+  "version": "1.0.0",
+  "description": "ServiceNow AI Agent lifecycle skills for building, auditing, evaluating, and tracing agents.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["servicenow", "ai-agent", "fluent", "now-sdk", "eval"],
+  "skills": "./skills/"
+}

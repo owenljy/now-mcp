@@ -1,0 +1,21 @@
+{
+  "name": "now-mcp",
+  "version": "1.0.2",
+  "description": "Fluent-native ServiceNow MCP server with runtime data, schema, script, attachment, and diagnostic tools.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["mcp", "servicenow", "fluent", "now-sdk"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "now-mcp — ServiceNow Fluent",
+    "shortDescription": "Operate a live ServiceNow instance through MCP.",
+    "longDescription": "Runtime data, schema, script, attachment, security, and diagnostic tools that pair with the ServiceNow Fluent SDK.",
+    "developerName": "Owen Liang",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": "Use now-mcp to inspect my ServiceNow instance."
+  }
+}

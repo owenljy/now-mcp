@@ -1,10 +1,7 @@
 ---
 name: sn-docs-search
 description: Retrieve live ServiceNow product/admin and release documentation from ServiceNow/ServiceNowDocs. Use for documented platform behavior, administration/configuration, release-specific behavior, cross-release differences, or explicit requests to search official product docs. Do NOT use for Fluent SDK authoring or `*.now.ts` API questions (imports, types, constructors, signatures, fields, or code examples); in a Fluent app, run `now-sdk explain` for those instead. Also do not trigger when the answer is already in the conversation.
-user-invocable: true
-disable-model-invocation: true
-allowed-tools: Bash(gh:*), Bash(curl:*), Bash(jq:*), Bash(pandoc:*), Read, Write
-context: fork
+allowed-tools: Bash(gh:*) Bash(curl:*) Bash(jq:*) Bash(pandoc:*) Read Write
 ---
 
 # ServiceNow Docs Search
@@ -63,9 +60,9 @@ curl -sIL "https://raw.githubusercontent.com/ServiceNow/ServiceNowDocs/HEAD/llms
 
 The branch list mixes **release codenames** (city names: `australia`, `zurich`, `yokohama`, `xanadu`, …) with **non-release branches** (`main`, `mobile`, `nofamily`, `other`, `store`) — keep only the codenames. "Latest" is the **default branch**, *not* the alphabetically-last name: the release alphabet wraps (…Yokohama → Zurich → **Australia**), so sorting lies. When unsure, treat the default branch as latest and proceed. Use `HEAD` as the branch token in raw URLs when you just mean "latest" and don't want to hardcode a name.
 
-## Step 1 — Infer scope (always; this skill runs forked and cannot prompt the user)
+## Step 1 — Infer scope
 
-This skill runs in an isolated forked context (`context: fork`), so **there is no interactive interview** — you cannot call `AskUserQuestion`. Always infer the three dimensions below from the invocation, and **state your assumed scope in one sentence at the top of your returned result** so the caller can correct you and re-invoke if needed.
+Infer the three dimensions below from the request before searching. State the assumed scope in one sentence at the top of the result; if the request is too ambiguous to search safely, ask one focused question.
 
 1. **Goal** — *definition / reference*, *compare across releases*, *find a workaround*, or *survey what's available*. Infer from the wording; default to *reference*.
 2. **Release(s)** — defaults to the **latest** (the default branch from Step 0b — `australia` at time of writing); honor any release the user names, or a *"compare X vs Y"*. Prefer `HEAD` over a literal name when you just mean "latest."

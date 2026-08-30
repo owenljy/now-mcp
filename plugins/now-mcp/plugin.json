@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "now-mcp",
+  "version": "1.0.2",
+  "description": "Fluent-native ServiceNow MCP server with runtime data, schema, script, attachment, and diagnostic tools.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["mcp", "servicenow", "fluent", "now-sdk"]
+}

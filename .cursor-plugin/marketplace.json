@@ -1,0 +1,26 @@
+{
+  "name": "foundry-suite",
+  "owner": {
+    "name": "Owen Liang"
+  },
+  "metadata": {
+    "description": "Portable ServiceNow skills and MCP tooling built around the Fluent SDK."
+  },
+  "plugins": [
+    {
+      "name": "now-mcp",
+      "source": "plugins/now-mcp",
+      "description": "Operate a live ServiceNow instance through MCP."
+    },
+    {
+      "name": "aia-toolkit",
+      "source": "plugins/aia-toolkit",
+      "description": "Build, audit, evaluate, and trace ServiceNow AI agents."
+    },
+    {
+      "name": "sn-poc",
+      "source": "plugins/sn-poc",
+      "description": "Take a ServiceNow PoC from idea to implementation plan."
+    }
+  ]
+}

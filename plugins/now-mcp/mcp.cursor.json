@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "now-mcp": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/scripts/launch.mjs"],
+      "cwd": "${PLUGIN_ROOT}",
+      "env": {
+        "SERVICENOW_CONFIG_PATH": "${SERVICENOW_CONFIG_PATH}",
+        "SERVICENOW_URL": "${SERVICENOW_URL}",
+        "SERVICENOW_USERNAME": "${SERVICENOW_USERNAME}",
+        "SERVICENOW_PASSWORD": "${SERVICENOW_PASSWORD}",
+        "SERVICENOW_READ_ONLY": "${SERVICENOW_READ_ONLY}"
+      }
+    }
+  }
+}

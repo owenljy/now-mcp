@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sn-poc",
+  "version": "1.0.0",
+  "description": "ServiceNow PoC discovery, specification, and implementation-planning skills.",
+  "author": {
+    "name": "Owen Liang"
+  },
+  "license": "MIT",
+  "keywords": ["servicenow", "poc", "discovery", "spec", "planning", "now-sdk"]
+}

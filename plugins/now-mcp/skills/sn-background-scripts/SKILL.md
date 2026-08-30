@@ -1,9 +1,7 @@
 ---
 name: sn-background-scripts
 description: Curated `sn_execute_background_script` templates for common ServiceNow instance-admin tasks (e.g. disabling MFA enforcement on a non-prod instance, or diagnosing why a user account can't authenticate — Active/Locked out/password/reset/API-access-role checks) so now-mcp's Basic/OAuth auth can connect. Use when the user wants to run one of these named operations rather than write the script from scratch.
-user-invocable: true
-disable-model-invocation: true
-allowed-tools: Read, mcp__plugin_now-mcp_now-mcp__sn_execute_background_script
+allowed-tools: Read mcp__plugin_now-mcp_now-mcp__sn_execute_background_script
 ---
 
 # ServiceNow Background Script Templates

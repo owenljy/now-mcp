@@ -4,7 +4,7 @@
  * this server is the live-instance observation +
  * data layer. Authoring app metadata (business rules, ACLs, UI policies,
  * flows, PA, portal, AI agents, AWA, ...) is the job of the ServiceNow Fluent
- * SDK driven by Claude Code — not blind table POSTs from here. The surface is
+ * SDK driven by the agent host — not blind table POSTs from here. The surface is
  * intentionally small: data CRUD, schema discovery, script execution,
  * attachments, update sets, and test-data seeding.
  */
@@ -263,7 +263,7 @@ export async function registerTools(
 /**
  * Register a degraded handler set used when configuration failed to load.
  *
- * The server still completes the MCP handshake (so Claude Code stays connected
+ * The server still completes the MCP handshake (so the host stays connected
  * and the user isn't left with an opaque "Failed to connect"), but every tool
  * call returns the configuration error so the cause is visible in the client.
  */

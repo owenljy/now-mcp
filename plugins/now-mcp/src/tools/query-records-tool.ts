@@ -28,8 +28,8 @@ import { truncateRecordFields } from '../utils/value-truncation.js';
  * truncation is signaled explicitly (structuredContent.truncated + _meta) and in
  * a human note so the caller can narrow the query instead of silently losing rows.
  *
- * The byte cap must stay well under the MCP host's own per-call output ceiling
- * (Claude Code defaults to ~25k tokens), not just "reasonably small" — dense
+ * The byte cap must stay well under common MCP hosts' per-call output ceilings,
+ * not just "reasonably small" — dense
  * content (JSON, stack traces, log lines) tokenizes at ~2-3 chars/token rather
  * than the ~4 chars/token of English prose, so a naive byte budget sized for
  * prose can still blow the host limit. Columnar removes the repeated-key

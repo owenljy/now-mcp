@@ -1,7 +1,7 @@
 /**
  * MCP Prompts — canned, discoverable workflows the user can invoke from the
  * client. Each returns a guidance message that orchestrates the existing tools
- * (and, for the Fluent loop, the now-sdk CLI run via Claude Code).
+ * (and, for the Fluent loop, the now-sdk CLI run by the agent host).
  */
 
 import { completable } from '@modelcontextprotocol/sdk/server/completable.js';

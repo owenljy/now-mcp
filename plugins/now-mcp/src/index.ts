@@ -2,7 +2,7 @@
 
 /**
  * now-mcp — Entry Point
- * Enables Claude to interact with ServiceNow instances via Model Context Protocol
+ * Enables AI agent hosts to interact with ServiceNow through Model Context Protocol
  *
  * Startup is built for resilience: the MCP handshake completes first, config
  * problems degrade (rather than crash), connection checks run in the background,

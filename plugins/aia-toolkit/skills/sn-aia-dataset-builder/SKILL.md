@@ -319,8 +319,8 @@ Golden responses (Pattern A, and any `expected_*` fields with literal values) ar
 
 **Refresh workflow** (works for any agent that calls live external systems):
 
-1. Open the eval repo in Claude Code with the relevant MCP server / API connection authenticated
-2. Ask: *"Re-run all the `<agent>` eval questions against the live source and update the dataset files with current responses"* — Claude will iterate over each `aia_artifact_dataset.now.ts` file, call the source for each prompt, and patch the golden field
+1. Open the eval repo in an Agent Skills-compatible coding host with the relevant MCP server or API connection authenticated
+2. Ask: *"Re-run all the `<agent>` eval questions against the live source and update the dataset files with current responses"* — the agent will iterate over each `aia_artifact_dataset.now.ts` file, call the source for each prompt, and patch the golden field
 3. Diff the result; sanity-check that the changes are real source drift, not agent regressions
 4. `pnpm run build:install` to redeploy the updated dataset records
 5. Re-run the eval and compare scores against the previous run

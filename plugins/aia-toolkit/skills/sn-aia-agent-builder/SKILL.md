@@ -1,8 +1,6 @@
 ---
 name: sn-aia-agent-builder
 description: Designs a ServiceNow AI Agent from a plain-English description and emits it as now-sdk typed Fluent (AiAgent / AiAgenticWorkflow). Use whenever the user wants to create, scaffold, edit, or design a ServiceNow AI agent or agentic workflow (sn_aia_* tables). Trigger even on a bare description — "build me an agent that…", "create an AI agent for…". The skill owns intent→architecture→instructions→scripts→quality; now-sdk owns the table structure.
-argument-hint: "[agent name or plain-English description]"
-effort: high
 ---
 
 # ServiceNow AI Agent Builder
@@ -132,7 +130,7 @@ and Q1/Q2 must always be confirmed.
    `triggerCondition`, `objectiveTemplate` with `${field}`; `schedule` for
    time-based). **The post-deploy `sys_security_acl` for triggers is still a
    `security_admin` Background Script, not SDK-written** — see
-   [docs/trigger-mode-setup.md](../docs/trigger-mode-setup.md) for that script and
+   [docs/trigger-mode-setup.md](../../references/trigger-mode-setup.md) for that script and
    the verification script.
 9. **Access (who can invoke)** — Any authenticated user / Specific roles (ask which)
    / Public. Emitted as the `securityAcl` param (auto-builds the ACL + roles).
@@ -151,7 +149,7 @@ tool mutate state or is it read-only?" → drives autopilot vs copilot).
   never spun as success or failure);
 - the instructions MUST resolve to a labeled run-level terminal outcome (`success` /
   `escalated`) — see `# Outcome` in the instructions template and
-  [../docs/tool-output-patterns.md → Run-level terminal outcomes](../docs/tool-output-patterns.md).
+  [../../references/tool-output-patterns.md → Run-level terminal outcomes](../../references/tool-output-patterns.md).
 
 ## Step 2b: Tool Selection Priority (active gate)
 
@@ -273,9 +271,9 @@ one question at a time:
   via `Now.include('<source .js>')`. No `.ts`, no `dist/`.
 
 > Start from the known-good templates:
-> [`scripts/tool-scripts/rest-tool.template.js`](../scripts/tool-scripts/rest-tool.template.js)
+> [`scripts/tool-scripts/rest-tool.template.js`](../../scripts/tool-scripts/rest-tool.template.js)
 > (REST + connection lookup) and
-> [`scripts/tool-scripts/action-tool.template.js`](../scripts/tool-scripts/action-tool.template.js)
+> [`scripts/tool-scripts/action-tool.template.js`](../../scripts/tool-scripts/action-tool.template.js)
 > (soft-fail action). Vendor `getAttribute` keys / special auth:
 > [references/credential-auth.md](references/credential-auth.md).
 
@@ -286,7 +284,7 @@ irreversible side-effect, returning a distinctly-labeled result (`dryRun: true` 
 true`). This makes the tool eval-safe and demoable offline with no rebuild — an admin flips
 a system property (`gs.getProperty('<scope>.dry_run')`). The opt-in guards are already in
 the two templates above. Return shapes + the flag→outcome rule live in
-[../docs/tool-output-patterns.md → Run-level terminal outcomes](../docs/tool-output-patterns.md).
+[../../references/tool-output-patterns.md → Run-level terminal outcomes](../../references/tool-output-patterns.md).
 This is a SHOULD, not a MUST. `action`/`subflow` tools get their dry-run behavior in Flow
 Designer, not here.
 
@@ -297,7 +295,7 @@ on?** Build a **testable version**: a hardcoded `TEST VALUES` block replacing ev
 `inputs.<field>`, the function body inlined, and every `return <v>;` rewritten to
 `gs.info(JSON.stringify(<v>));`.
 - **Resolve `run_privileged_script`** (see
-  [../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md))
+  [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md))
   and run it via that tool, showing the captured output. (On the `servicenow`
   MCP this is `sn_execute_background_script`, not `execute_script` —
   that tool no longer exists.)
@@ -452,7 +450,7 @@ instance now-sdk/MCP are currently connected to. Before running:
 
 Confirm the agent/usecase is deployed by resolving `read_records` on
 `sn_aia_agent` / `sn_aia_usecase` (see
-[../docs/mcp-capability-resolution.md](../docs/mcp-capability-resolution.md)),
+[../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)),
 pick one example question from the Spec, launch-and-poll by resolving
 `run_privileged_script` (the pattern in `/sn-aia-trace-analyzer` Phase 1
 Option C), and inspect for failure / phantom success (a

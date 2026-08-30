@@ -1,6 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "now-mcp",
+  "version": "1.0.2",
   "displayName": "now-mcp — ServiceNow Fluent",
   "description": "Fluent-native MCP server for ServiceNow: live read/observe + data tools for Claude, paired with auto-injected now-sdk/now-mcp workflow rules.",
   "author": {
@@ -14,7 +15,8 @@
     "now-sdk",
     "claude"
   ],
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./mcp.claude.json",
+  "hooks": "./hooks/claude.json",
   "userConfig": {
     "instance_url": {
       "type": "string",

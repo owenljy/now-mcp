@@ -8,7 +8,7 @@ background script is in [`background-scripts.md`](background-scripts.md).
 Every query block shows the illustrative param shape (`tableName` string, `query` encoded
 string, `fields` **array** of strings, `limit`) from the `servicenow` MCP's
 `sn_query_records` tool. Resolve `read_records` per
-[`../../docs/mcp-capability-resolution.md`](../../docs/mcp-capability-resolution.md) against
+[`../../../references/mcp-capability-resolution.md`](../../../references/mcp-capability-resolution.md) against
 whatever MCP is actually connected, and adapt these param names to its real schema.
 
 > **Field-name traps** (real `sn_aia_*` DB columns, verified via `now-sdk query`, re-checkable
@@ -30,7 +30,7 @@ but returned no data, so the LLM downstream fabricates or emits placeholders.
 It is the **runtime signature of a script-tool that doesn't return a value on every path** —
 most often a tool authored with module syntax (`export function …` / `require`) or a compiled
 `dist/` bundle instead of a **plain-JS IIFE** (see the Runtime Contract in
-`/sn-aia-agent-builder` and the `CLAUDE.md` PLAIN-JS IIFE blocker). **The fix is in the tool
+the `sn-aia-agent-builder` skill and its PLAIN-JS IIFE blocker). **The fix is in the tool
 script, not the agent.** Every other mention of "phantom success" in the skill refers back to
 this definition.
 

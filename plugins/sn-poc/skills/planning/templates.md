@@ -290,7 +290,7 @@ Stories are **specifications for developers**, not implementation guides.
 
 - MCP tool names (e.g., `mcp__servicenow-mcp__create_table_acl`)
 - Tool-specific syntax or code snippets for tools
-- References to Claude Code, agents, or AI assistants
+- References to agent hosts, agents, or AI assistants
 - Specific tool invocation patterns
 
 The developer executing the story decides which tools to use.

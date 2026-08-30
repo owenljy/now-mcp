@@ -1,11 +1,11 @@
-# now-mcp — Claude's ServiceNow instance, built around Fluent (`now-sdk`)
+# now-mcp — ServiceNow runtime tools, built around Fluent (`now-sdk`)
 
 A small, trustworthy, **Fluent-native**
-[Model Context Protocol](https://modelcontextprotocol.io) server that lets Claude
+[Model Context Protocol](https://modelcontextprotocol.io) server that lets an AI agent
 **operate a running ServiceNow instance**: read and write runtime data, inspect
 schema, run server-side scripts, and manage attachments. It also carries an
-on-demand skill (`sn-docs-search`) and a SessionStart hook that injects the
-standing **Fluent workflow** rules into a Fluent project's `CLAUDE.md`.
+on-demand skills. The Claude adapter additionally injects standing **Fluent
+workflow** rules into a Fluent project's `CLAUDE.md`.
 
 Part of the [`foundry-suite`](../../README.md) marketplace. For the AI Agent
 lifecycle skills, see the [`aia-toolkit`](../aia-toolkit/README.md) plugin.
@@ -31,9 +31,10 @@ MCP writes an incident but never a business rule.
 - A **ServiceNow instance** and credentials (basic auth or OAuth)
 - *(Optional)* the **`now-sdk`** CLI for the Fluent pairing: `pnpm add -g @servicenow/sdk`
 
-### Install as a Claude Code plugin (recommended)
+### Install as a plugin
 
-Install from the `foundry-suite` marketplace — from git, no manual build:
+Use the host-specific commands in the repository [README](../../README.md).
+For Claude Code, install from the `foundry-suite` marketplace:
 
 ```
 /plugin marketplace add <REPO_URL>
@@ -392,8 +393,8 @@ once; `now-sdk` is the single switch (reconnect the MCP after switching).
 credentials. Set `SERVICENOW_FOLLOW_NOW_SDK=false` to pin the YAML `default`, and
 use `sn_sdk_status` to check alignment.
 
-### Fluent workflow rules (auto-injected)
-When a project is a Fluent app (`now.config.json` at its root), a SessionStart
+### Fluent workflow rules (Claude adapter)
+When Claude Code opens a Fluent app (`now.config.json` at its root), its adapter's SessionStart
 hook (`scripts/bootstrap-fluent-claudemd.mjs`) appends a standing **Fluent
 workflow** block to that project's `CLAUDE.md`. Because `CLAUDE.md` is loaded
 into every session's system prompt, these rules are always in force — no skill
@@ -539,18 +540,15 @@ to pin the YAML's own `default` instead.
 <details>
 <summary>Local development (working inside this repo)</summary>
 
-The committed `.mcp.json` uses `${CLAUDE_PLUGIN_ROOT}`, so it's meant for the
-plugin runtime, **not** for opening the repo directly. To hack on the server in
-this checkout, build and register it at user scope pointing at your config:
+To hack on the server in this checkout, install dependencies and start it with
+the same `SERVICENOW_*` variables used by the portable and Codex adapters:
 
 ```bash
-git clone <REPO_URL>
+git clone https://github.com/owenljy/foundry-suite
 cd foundry-suite/plugins/now-mcp
 pnpm install
 pnpm build
-claude mcp add now-mcp -s user \
-  --env SERVICENOW_CONFIG_PATH="$PWD/config/sn-credential.yaml" \
-  -- node "$PWD/build/index.js"
+SERVICENOW_CONFIG_PATH="$PWD/config/sn-credential.yaml" node build/index.js
 ```
 
 Or run the source directly without building: `pnpm exec tsx src/index.ts`.

@@ -1,87 +1,94 @@
-# foundry-suite — Claude's ServiceNow toolkit, built around Fluent (`now-sdk`)
+# foundry-suite
 
-A Claude Code **plugin marketplace** for working on ServiceNow the Fluent way. It
-ships **plugins** you can install separately or together, and it grows over
-time.
+Portable ServiceNow tooling for Claude Code, Codex, Cursor, and other Agent
+Plugins-compatible hosts. It complements the official Fluent SDK (`now-sdk`):
+Fluent authors application metadata; `now-mcp` operates the running instance;
+skills orchestrate both.
 
-This suite does **not** install or replace [`now-sdk`](https://github.com/ServiceNow/sdk)
-(the official **Fluent SDK**, published as [`@servicenow/sdk`](https://www.npmjs.com/package/@servicenow/sdk)
-on npm) — get that from its own repo. Foundry-suite is the layer that sits
-*next to* it: an MCP server for the running instance, plus skills that know
-when to defer to `now-sdk` and when to act on their own.
+## Plugins
 
-| Plugin | What it is |
+| Plugin | Purpose |
 |---|---|
-| **[`now-mcp`](plugins/now-mcp/README.md)** | A small, trustworthy, **Fluent-native** [MCP](https://modelcontextprotocol.io) server that lets Claude **operate a running ServiceNow instance** — read/write runtime data, inspect schema, run scripts, manage attachments. Carries the `sn-docs-search` skill and a SessionStart hook that injects the standing Fluent-workflow rules into a Fluent project's `CLAUDE.md`. |
-| **[`aia-toolkit`](plugins/aia-toolkit/README.md)** | Skills for the full **ServiceNow AI Agent lifecycle** — build an agent as now-sdk Fluent, audit it against deployment guardrails, build eval datasets, set up the platform eval pipeline, and analyze runtime execution traces. Skills-only; pairs with `now-mcp` for live-instance reads. |
-| **[`sn-poc`](plugins/sn-poc/README.md)** | Skills that take a **PoC feature idea from a sentence to implementation-ready stories** — challenge the idea, generate client meeting questions, write a client-approvable spec and a technical spec, decompose into stories. Skills-only; start with `/sn-poc:intake`. |
+| [`now-mcp`](plugins/now-mcp/README.md) | MCP tools for runtime data, schema, scripts, attachments, security, and diagnostics. |
+| [`aia-toolkit`](plugins/aia-toolkit/README.md) | Build, audit, evaluate, and trace ServiceNow AI Agents. |
+| [`sn-poc`](plugins/sn-poc/README.md) | Take a PoC from discovery through specifications and implementation-ready stories. |
 
-## The idea in one paragraph
-
-* **No Wrapping, No Replacement:** We do **not** wrap, abstract, or replace `now-sdk` (Fluent). `now-sdk` remains the absolute, single source of truth for your application's definition, schema, and metadata.
-* **Separation of Concerns:** 
-  * **Fluent (`now-sdk`) defines the application** (the compile-time blueprint: tables, business rules, ACLs, workflows) as source code.
-  * **`now-mcp` operates the running instance** (the runtime layer: querying records, reading live schema, writing data rows, executing server-side scripts, managing attachments).
-  * **Skills orchestrate the two** into seamless developer and agent workflows.
-* **The Boundary:** **Data rows are runtime (MCP); configuration/metadata is the app's definition (Fluent source).** This is why the MCP writes an incident, but *never* writes or modifies a business rule directly.
-* **Ground truth over memory:** before writing any Fluent (`*.now.ts`), run
-  [`now-sdk explain <topic>`](https://github.com/ServiceNow/sdk) — its built-in,
-  always-current API reference — rather than trusting a remembered shape. This
-  rule is auto-injected into a Fluent project's `CLAUDE.md` by `now-mcp`; see
-  [`plugins/now-mcp/README.md`](plugins/now-mcp/README.md#fluent-workflow-rules-auto-injected).
-
-
-![SDK authors the application, MCP operates the running instance, Skills orchestrate the two — with a "where does it go?" guide](docs/three-layers.png)
-
----
+Install `now-mcp` for live-instance operations. Add either skills plugin when
+you need that workflow. `now-sdk` remains a separate prerequisite for authoring
+Fluent metadata.
 
 ## Install
 
-The suite ships as Claude Code **plugins** from the `foundry-suite`
-marketplace — install from git, no manual build. Add the marketplace once, then
-install whichever plugins you want:
+### Claude Code
 
-```
-/plugin marketplace add <REPO_URL>
-/plugin install now-mcp@foundry-suite      # the MCP server + Fluent skills/hook
-/plugin install aia-toolkit@foundry-suite  # the AI Agent lifecycle skills (optional)
-/plugin install sn-poc@foundry-suite       # the PoC intake-to-planning skills (optional)
+```text
+/plugin marketplace add https://github.com/owenljy/foundry-suite
+/plugin install now-mcp@foundry-suite
+/plugin install aia-toolkit@foundry-suite
+/plugin install sn-poc@foundry-suite
 /reload-plugins
 ```
 
-Install `now-mcp` alone for the data/schema/script tools; add `aia-toolkit` when
-you work on ServiceNow AI Agents, and `sn-poc` when you're scoping and planning
-a new PoC feature. Both `aia-toolkit` and `sn-poc` are skills-only (no setup
-form) and use `now-mcp` for their live-instance reads, so installing all three
-is the usual setup.
+`now-mcp` exposes Claude's setup form for a ServiceNow URL, username, password,
+and read-only mode. OAuth and multi-instance setups use the YAML file described
+in its [configuration guide](plugins/now-mcp/README.md#configuration).
 
-Neither plugin installs `now-sdk` itself — get the CLI separately from
-[`github.com/ServiceNow/sdk`](https://github.com/ServiceNow/sdk)
-(`pnpm add -g @servicenow/sdk`) if you'll be authoring Fluent alongside it.
+### Codex
 
-For per-plugin setup, tools, configuration, and safety details, see each
-plugin's README:
-
-- **[`plugins/now-mcp/README.md`](plugins/now-mcp/README.md)** — connection setup
-  (single-instance form or YAML), the full tool surface, now-sdk pairing, and the
-  safety model.
-- **[`plugins/aia-toolkit/README.md`](plugins/aia-toolkit/README.md)** — the five
-  AI Agent skills, where to start, and the eval flow.
-- **[`plugins/sn-poc/README.md`](plugins/sn-poc/README.md)** — the discovery →
-  spec → planning pipeline, where to start, and what each phase produces.
-
----
-
-## Repository layout
-
+```bash
+codex plugin marketplace add owenljy/foundry-suite
+codex plugin add now-mcp@foundry-suite
+codex plugin add aia-toolkit@foundry-suite
+codex plugin add sn-poc@foundry-suite
 ```
-foundry-suite/
-├── .claude-plugin/marketplace.json   # the marketplace manifest
-├── plugins/
-│   ├── now-mcp/                       # the MCP server plugin (self-contained)
-│   ├── aia-toolkit/                   # the AI Agent skills plugin
-│   └── sn-poc/                        # the PoC intake-to-planning skills plugin
-├── docs/
-├── LICENSE
-└── README.md                         # you are here
+
+Before starting Codex, export `SERVICENOW_URL`, `SERVICENOW_USERNAME`, and
+`SERVICENOW_PASSWORD`, or set `SERVICENOW_CONFIG_PATH` to a YAML config. Writes
+remain disabled unless `SERVICENOW_READ_ONLY=false`.
+
+### Cursor
+
+For local development, clone this repo and link the plugins into Cursor:
+
+```bash
+mkdir -p ~/.cursor/plugins/local
+ln -s "$PWD/plugins/now-mcp" ~/.cursor/plugins/local/now-mcp
+ln -s "$PWD/plugins/aia-toolkit" ~/.cursor/plugins/local/aia-toolkit
+ln -s "$PWD/plugins/sn-poc" ~/.cursor/plugins/local/sn-poc
 ```
+
+Reload Cursor, open **Customize → Plugins**, and configure `now-mcp` there.
+Teams can import this repository through **Dashboard → Plugins → Add
+Marketplace → Import from Repo**; the repo includes
+`.cursor-plugin/marketplace.json`.
+
+## Portable layout
+
+Each plugin contains:
+
+- `plugin.json` and, for `now-mcp`, `mcp.json`: Agent Plugins 1.0 portable core.
+- `.claude-plugin/plugin.json`: Claude adapter.
+- `.codex-plugin/plugin.json`: Codex adapter.
+- `.cursor-plugin/plugin.json`: Cursor adapter.
+
+The repository also publishes host-native marketplace catalogs under
+`.claude-plugin/`, `.agents/plugins/`, and `.cursor-plugin/`.
+
+Claude-only setup variables and the `CLAUDE.md` bootstrap hook live only in the
+Claude adapter. Portable and Codex installs inherit `SERVICENOW_*` environment
+variables; Cursor uses plugin variables.
+
+## Development
+
+```bash
+cd plugins/now-mcp
+corepack enable
+pnpm install
+pnpm build
+pnpm test
+cd ../..
+node scripts/validate-plugins.mjs
+```
+
+Node.js 22+ is required. See the individual plugin READMEs for workflow and
+configuration details.

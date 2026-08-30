@@ -10,7 +10,7 @@
  * ../ hops land inside src/ and the path resumes at server/... with NO redundant src/ segment.
  * A leading ../../../../src/server/... would resolve to src/src/server/... and fail scan check [10].
  *
- * WHY THIS SHAPE (read CLAUDE.md "Runtime contract" / the agent-builder SKILL.md section):
+ * WHY THIS SHAPE (read the agent-builder SKILL.md runtime-contract section):
  * the script is stored as a STRING in sn_aia_tool.script and eval'd by a Rhino sandbox — NOT
  * Node.js. There is no module system.
  *   - DO    wrap everything in an IIFE; the last expression is the tool's return value.

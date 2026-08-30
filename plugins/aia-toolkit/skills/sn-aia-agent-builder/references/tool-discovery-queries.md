@@ -3,7 +3,7 @@
 Run when interviewing the user about capabilities (SKILL.md Step 1, Q2) to find
 existing instance resources before proposing any new tool. Resolve the
 `read_records` capability (see
-[../../docs/mcp-capability-resolution.md](../../docs/mcp-capability-resolution.md))
+[../../../references/mcp-capability-resolution.md](../../../references/mcp-capability-resolution.md))
 and run these queries **in parallel** for each capability keyword, adapting the
 param names below to whichever tool resolves. If no matching read tool is
 connected, fall back to the background script in
