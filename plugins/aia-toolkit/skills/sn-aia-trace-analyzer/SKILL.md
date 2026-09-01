@@ -11,6 +11,14 @@ Use the current request and conversation as the diagnostic context, including an
 
 > **Not for eval infrastructure issues.** If your problem is "eval run produced null results" or "Auto Chat didn't start," use `/sn-eval-runner-builder` instead. This skill is for "the agent ran but did something wrong."
 
+> **Not for external-provider (AI Control Tower) trace collection.** If the traces
+> come from a non-ServiceNow provider through an AI Trace Collector connector —
+> symptoms like "the connector reports SUCCESS but evaluated sessions stay 0", or
+> anything living in `sn_aict_trace_coll_*` / `sn_ai_observe_ai_session|_ai_trace|_ai_span`
+> — then none of the `sn_aia_*` tables below exist for that run and the Phase 2
+> walk will find nothing. That is a separate pipeline (MID collector → AI Trace
+> Gateway → evaluation engine); say so up front instead of walking Phase 2.
+
 > **Prerequisite:** The agent must have been invoked at least once so tracing records exist. If no execution plan exists yet, this skill can trigger a test run first (Phase 1). This skill reads via the `read_records` capability, resolved against whatever MCP is connected (see [../../references/mcp-capability-resolution.md](../../references/mcp-capability-resolution.md)); if nothing matches, **tell the user explicitly** before falling back to the background scripts in [references/background-scripts.md](references/background-scripts.md).
 
 ---

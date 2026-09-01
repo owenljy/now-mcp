@@ -19,6 +19,10 @@ file under `references/` so only the one you need gets read into context.
 - now-mcp can't authenticate against an account and you need to know which
   precondition is missing (Active, Locked out, password state, API access role,
   MFA) before guessing at a fix.
+- A table you need to read has `ws_access` off, so every Table-API read (query or
+  aggregate) returns 403 before any role/ACL check runs — a background script
+  with `GlideRecordSecure`/`GlideAggregate` is the only way in. now-mcp's 403
+  response names this case explicitly; trust that hint rather than chasing roles.
 
 ## When NOT to use
 
@@ -26,6 +30,22 @@ file under `references/` so only the one you need gets read into context.
   directly with `sn_execute_background_script`; don't force-fit a template.
 - The task is application metadata authoring (tables, business rules, ACLs, UI
   policies) — that belongs in the Fluent SDK (now-sdk), not a background script.
+
+## Transport limits
+
+The sys_trigger transport shapes what a script can return — budget for it before
+writing one, because every failure below reports the same opaque error.
+
+- **Output truncates at roughly 2.7 KB** (`truncationReason: "mailbox_limit"`).
+  Count and aggregate server-side with `GlideAggregate` and log one compact JSON
+  line; never dump rows expecting to read them all back.
+- **`resultMode: "json"` can fail a script that otherwise succeeds.** If you get
+  `script completed with failure` on a script whose final line is valid JSON,
+  re-run without `resultMode` before editing the script body.
+- **`script completed with failure` carries no cause.** Do not retry the same
+  shape — simplify first (fewer tables, no nested per-row queries, smaller
+  `setLimit`), and if the table is Table-API readable, prefer a plain query or
+  aggregate call over a script.
 
 ## Templates
 
