@@ -117,7 +117,7 @@ export function registerResources(server: McpServer, instanceManager: InstanceMa
 					try {
 						// Fetch the (broad) table list once and cache it; prefix-filtering
 						// happens locally in rankTables, so we don't pass the partial here.
-						const tables = await schemaService.listTables(undefined, 100);
+						const { tables } = await schemaService.listTables(undefined, 100);
 						const names = tables.map((t) => t.name);
 						tableNameCache.set(cacheKey, { at: Date.now(), names });
 						// Blend in common tables so the list is never empty/odd-shaped.

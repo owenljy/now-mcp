@@ -424,16 +424,22 @@ test('disk cache identity includes URL when the same profile name is repointed',
   assert.equal(second.state.dictionaryCalls, 1, 'repointed profile must not consume old disk cache');
 });
 
-function makeWsAccessClient(wsAccessValue) {
+function makeWsAccessClient(wsAccessValue, extraRow = {}) {
   const state = { calls: 0 };
   return {
     state,
     async get(endpoint, params) {
       state.calls++;
       assert.equal(endpoint, '/api/now/table/sys_db_object');
-      assert.equal(params.sysparm_fields, 'name,ws_access');
+      // One request resolves the whole access profile: both gating flags plus
+      // the owning scope. Fetching them separately is what allowed a 403 hint
+      // to recommend a transport without knowing whether it would silently
+      // return zero rows.
+      assert.equal(params.sysparm_fields, 'name,ws_access,read_access,sys_scope,sys_scope.scope');
       if (wsAccessValue === undefined) return { result: [] };
-      return { result: [{ name: 'sn_grc_indicator', ws_access: wsAccessValue }] };
+      return {
+        result: [{ name: 'sn_grc_indicator', ws_access: wsAccessValue, ...extraRow }],
+      };
     },
   };
 }
@@ -462,6 +468,18 @@ test('checkWebServiceAccess reports exists:false for a table with no sys_db_obje
   assert.deepEqual(result, { exists: false, wsAccess: false });
 });
 
+test('checkWebServiceAccess collapses an unknown ws_access to false for its boolean contract', async () => {
+  // The wrapper's callers only ask "is REST blocked?" and cannot express
+  // unknown. Callers that must tell unknown from off use getTableAccessProfile.
+  const client = makeWsAccessClient('', { read_access: 'true' });
+  const svc = new SchemaService(makeManager(client));
+
+  assert.deepEqual(await svc.checkWebServiceAccess('incident', 'wsunknown'), {
+    exists: true,
+    wsAccess: false,
+  });
+});
+
 test('checkWebServiceAccess returns null (not a throw) when the probe itself fails', async () => {
   const client = {
     async get() {
@@ -483,6 +501,84 @@ test('checkWebServiceAccess serves the second call from cache (client hit once)'
 
   await svc.checkWebServiceAccess('sn_grc_indicator', 'wscache');
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
+});
+
+// ── getTableAccessProfile ────────────────────────────────────────────────────
+
+test('getTableAccessProfile resolves both gating flags and the owning scope in one read', async () => {
+  const client = makeWsAccessClient('false', {
+    read_access: 'false',
+    sys_scope: 'a1b2c3',
+    'sys_scope.scope': 'sn_ai_observe',
+  });
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('sn_grc_indicator', 'profile_full');
+  assert.deepEqual(profile, {
+    exists: true,
+    wsAccess: false,
+    readAccess: false,
+    owningScope: { sysId: 'a1b2c3', name: 'sn_ai_observe' },
+  });
+  assert.equal(client.state.calls, 1, 'the whole profile must cost one request, not three');
+});
+
+test('getTableAccessProfile reports an unreadable flag as undefined, never as false', async () => {
+  // The distinction is load-bearing: "read_access is off" justifies calling a
+  // zero-row script result inconclusive, whereas "we could not read the flag"
+  // justifies nothing. Collapsing the two would invent evidence.
+  const client = makeWsAccessClient('true', { read_access: '' });
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('incident', 'profile_unknown');
+  assert.equal(profile.wsAccess, true);
+  assert.equal(profile.readAccess, undefined, 'an empty flag is unknown, not false');
+});
+
+test('getTableAccessProfile normalizes the boolean shapes ServiceNow actually returns', async () => {
+  for (const [raw, expected] of [
+    ['true', true],
+    ['false', false],
+    [true, true],
+    [false, false],
+    ['1', true],
+    ['0', false],
+    ['', undefined],
+    [null, undefined],
+  ]) {
+    const client = makeWsAccessClient('true', { read_access: raw });
+    const svc = new SchemaService(makeManager(client));
+    const profile = await svc.getTableAccessProfile('incident', `norm_${String(raw)}`);
+    assert.equal(profile.readAccess, expected, `read_access ${JSON.stringify(raw)}`);
+  }
+});
+
+test('getTableAccessProfile reports exists:false for a table with no sys_db_object row', async () => {
+  const client = makeWsAccessClient(undefined);
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('nope_not_a_table', 'profile_missing');
+  assert.deepEqual(profile, { exists: false });
+});
+
+test('getTableAccessProfile returns null (not a throw) when the probe itself fails', async () => {
+  const svc = new SchemaService(
+    makeManager({
+      async get() {
+        throw new Error('network error');
+      },
+    }),
+  );
+
+  assert.equal(await svc.getTableAccessProfile('incident', 'profile_failure'), null);
+});
+
+test('getTableAccessProfile omits owningScope when the scope cannot be resolved', async () => {
+  const client = makeWsAccessClient('true', { read_access: 'true', sys_scope: '', 'sys_scope.scope': '' });
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('incident', 'profile_noscope');
+  assert.equal(profile.owningScope, undefined);
 });
 
 function makeTableScopeClient(row) {
@@ -548,15 +644,20 @@ test('resolveTableScope serves the second call from cache (client hit once)', as
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
 });
 
-function makeListTablesClient(rows) {
+function makeListTablesClient(rows, totalCount) {
   const state = { calls: 0, params: null };
   return {
     state,
-    async get(endpoint, params) {
+    // listTables reads X-Total-Count off the same response, so the stub must
+    // supply headers as well as the body.
+    async getWithHeaders(endpoint, params) {
       state.calls++;
       state.params = params;
       assert.equal(endpoint, '/api/now/table/sys_db_object');
-      return { result: rows };
+      return {
+        data: { result: rows },
+        headers: totalCount === undefined ? {} : { 'x-total-count': String(totalCount) },
+      };
     },
   };
 }
@@ -567,7 +668,7 @@ test('listTables requests sys_scope.scope and reports it for a scoped/custom tab
   ]);
   const svc = new SchemaService(makeManager(client));
 
-  const tables = await svc.listTables('x_acme_widget', 100, 'listscoped');
+  const { tables } = await svc.listTables('x_acme_widget', 100, 'listscoped');
   assert.equal(client.state.params.sysparm_fields, 'name,label,super_class.name,sys_scope.scope');
   assert.equal(tables.length, 1);
   assert.equal(tables[0].name, 'x_acme_widget');
@@ -580,9 +681,43 @@ test('listTables omits scope for a global/OOB table (including the literal "glob
   ]);
   const svc = new SchemaService(makeManager(client));
 
-  const tables = await svc.listTables('incident', 100, 'listglobal');
+  const { tables } = await svc.listTables('incident', 100, 'listglobal');
   assert.equal(tables[0].extends, 'task');
   assert.equal(tables[0].scope, undefined);
+});
+
+test('listTables reports the total match count and honors offset', async () => {
+  const client = makeListTablesClient(
+    [{ name: 'incident', label: 'Incident', 'super_class.name': 'task', 'sys_scope.scope': 'global' }],
+    417,
+  );
+  const svc = new SchemaService(makeManager(client));
+
+  const { totalMatching } = await svc.listTables('inc', 50, 'listtotal', undefined, 100);
+  assert.equal(totalMatching, 417);
+  assert.equal(client.state.params.sysparm_offset, 100);
+  assert.equal(client.state.params.sysparm_limit, 50);
+});
+
+test('listTables reports totalMatching as null when the instance omits the header', async () => {
+  // Null, not 0: "the instance did not tell us" must not read as "no matches".
+  const client = makeListTablesClient([{ name: 'incident', label: 'Incident' }]);
+  const svc = new SchemaService(makeManager(client));
+
+  const { totalMatching } = await svc.listTables('inc', 50, 'listnototal');
+  assert.equal(totalMatching, null);
+});
+
+test('listTables caches per offset, so page 2 is not served page 1', async () => {
+  const client = makeListTablesClient([{ name: 'incident', label: 'Incident' }], 200);
+  const svc = new SchemaService(makeManager(client));
+
+  await svc.listTables('inc', 50, 'listpaged', undefined, 0);
+  assert.equal(client.state.calls, 1);
+  await svc.listTables('inc', 50, 'listpaged', undefined, 0);
+  assert.equal(client.state.calls, 1, 'same page should be cached');
+  await svc.listTables('inc', 50, 'listpaged', undefined, 50);
+  assert.equal(client.state.calls, 2, 'a different offset is a different result set');
 });
 
 /**

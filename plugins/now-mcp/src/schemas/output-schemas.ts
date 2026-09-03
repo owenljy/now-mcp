@@ -233,6 +233,21 @@ export const GetTableSchemaOutputSchema = z.object({
 });
 
 /** sn_list_tables */
+/**
+ * Paging metadata for a discovery search.
+ *
+ * `totalMatching` is the point: without it a full page is ambiguous between
+ * "these are all the matches" and "these are the first N of hundreds", and
+ * reading a slice as the whole set is how a search concludes the wrong table is
+ * the only candidate. Absent when the instance did not return X-Total-Count.
+ */
+const DiscoveryPaginationSchema = z.object({
+	limit: z.number(),
+	offset: z.number(),
+	hasMore: z.boolean(),
+	totalMatching: z.number().optional(),
+});
+
 export const ListTablesOutputSchema = z.object({
 	success: z.boolean(),
 	count: z.number(),
@@ -240,6 +255,9 @@ export const ListTablesOutputSchema = z.object({
 	concept: z.array(z.string()).optional(),
 	instance: z.string(),
 	...columnarShape('table'),
+	/** Rows are relevance-ordered, not in the instance's name order. */
+	ranked: z.boolean().optional(),
+	pagination: DiscoveryPaginationSchema.optional(),
 	truncated: z.boolean().optional(),
 	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
 	hints: z.array(z.string()).optional(),
@@ -252,6 +270,14 @@ export const FindFieldsOutputSchema = z.object({
 	concept: z.array(z.string()),
 	instance: z.string(),
 	...columnarShape('field'),
+	ranked: z.boolean().optional(),
+	pagination: DiscoveryPaginationSchema.optional(),
+	/**
+	 * How the matches spread across tables, on a broad search. A concept that
+	 * matches 40 fields on one table is a different situation from one that
+	 * matches 40 fields across 40 tables, and the shortlist alone hides which.
+	 */
+	tableDistribution: z.array(z.object({ table: z.string(), fields: z.number() })).optional(),
 	truncated: z.boolean().optional(),
 	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
 	hints: z.array(z.string()).optional(),
@@ -282,7 +308,33 @@ export const ExecuteScriptOutputSchema = z.object({
 	outputOriginalChars: z.number().optional(),
 	outputReturnedChars: z.number().optional(),
 	truncationReason: z.enum(['mailbox_limit', 'render_cap']).optional(),
+	/** @deprecated Reports the WHOLE execution duration, not the queue wait — the
+	 * name has always overstated what it measures. Kept for compatibility; read
+	 * `timings` instead, which separates the queue wait from script runtime. */
 	queueDelayMs: z.number().optional(),
+	/**
+	 * Where the wall-clock time actually went on the sys_trigger path.
+	 *
+	 * Reported because the single duration number invited the wrong conclusion:
+	 * a 31-second call was overwhelmingly scheduler queue, not script work, so
+	 * "make the script faster" was never the fix — installing the Scripted REST
+	 * fast path is.
+	 */
+	timings: z
+		.object({
+			totalDurationMs: z.number(),
+			/** DERIVED (total − script − cleanup), not read from the scheduler's own
+			 * clock. Absent when the script did not report its duration. */
+			observedSchedulerWaitMs: z.number().optional(),
+			scriptDurationMs: z.number().optional(),
+			cleanupDurationMs: z.number(),
+			pollCount: z.number(),
+		})
+		.optional(),
+	/** Emitted at most once per instance per process, when the scheduler wait
+	 * shows the sys_trigger transport is the bottleneck and a one-time config
+	 * change would remove it. */
+	transportPerformanceHint: z.string().optional(),
 	error: z.string().nullable().optional(),
 	instance: z.string(),
 	transportConfiguration: z
@@ -311,6 +363,31 @@ export const ExecuteScriptOutputSchema = z.object({
 		})
 		.optional(),
 	schemaCheck: z.array(OpenRecord).optional(),
+	/**
+	 * Tables the script reads that the chosen execution scope may not fully see.
+	 *
+	 * Emitted when a referenced table has sys_db_object.read_access off: such a
+	 * table is readable only from its owning application scope, and a script in
+	 * another scope gets ZERO ROWS with no error. Without this warning an empty
+	 * result is indistinguishable from "the table really is empty" — the exact
+	 * mistake that produced a wrong root cause and a retracted recommendation.
+	 *
+	 * Advisory, never blocking: static analysis cannot know that a cross-scope
+	 * read was invalid, and legitimate scripts do read tables they can see.
+	 */
+	visibilityWarnings: z
+		.array(
+			z.object({
+				table: z.string(),
+				reason: z.string(),
+				/** The scope the script is believed to run in, when known. */
+				executionScope: z.string().optional(),
+				/** False ⇒ an empty result from this script proves nothing about the table. */
+				emptyResultIsConclusive: z.boolean(),
+				recommendedTransport: z.string().optional(),
+			}),
+		)
+		.optional(),
 	// Present when allowWrites:true and writes were detected — echoes the approved
 	// write calls (and a warning if any hit metadata/config tables).
 	writeApproved: z

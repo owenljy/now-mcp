@@ -56,7 +56,31 @@ const BackgroundScriptTransportStatusSchema = z.object({
 	usesCompanionEndpoint: z.boolean(),
 	fallbackOnFailure: z.literal(false),
 	privilegeModel: z.enum(['configured_endpoint_context', 'scheduled_job_context']),
-	diagnostic: z.string(),
+	/**
+	 * Prose explanation of the transport. Hoisted to the response-level
+	 * `transportDiagnostics` map when several instances share a transport, since
+	 * it is a property of the TRANSPORT, not of the instance — repeating the same
+	 * paragraph per instance was pure duplication. Always present when only one
+	 * instance is reported, so a single-instance caller sees no change.
+	 */
+	diagnostic: z.string().optional(),
+});
+
+/**
+ * Observed background-script transport latency for one instance this session.
+ *
+ * Absent until a background script has actually run — an empty history is
+ * reported as absence rather than as zeros, which would read as "instantaneous".
+ */
+export const TransportHealthSchema = z.object({
+	samples: z.number().int().nonnegative(),
+	medianTotalDurationMs: z.number(),
+	/** Median scheduler queue wait. This, not total duration, is the number that
+	 * tells you whether the transport itself is the bottleneck. */
+	medianSchedulerWaitMs: z.number().optional(),
+	medianPollCount: z.number(),
+	timeouts: z.number().int().nonnegative(),
+	note: z.string().optional(),
 });
 
 export const ConnectionStatusOutputSchema = z.object({
@@ -65,8 +89,16 @@ export const ConnectionStatusOutputSchema = z.object({
 		BreakerStatusSchema.extend({
 			isDefault: z.boolean(),
 			backgroundScriptTransport: BackgroundScriptTransportStatusSchema,
+			/** Present once a background script has run on this instance. */
+			transportHealth: TransportHealthSchema.optional(),
 		}),
 	),
+	/**
+	 * Transport diagnostics said once, keyed by transport, when more than one
+	 * instance is reported. Breaker state and auth stay per-instance because they
+	 * genuinely differ; this prose does not.
+	 */
+	transportDiagnostics: z.record(z.string(), z.string()).optional(),
 });
 
 export const ResetConnectionOutputSchema = z.object({

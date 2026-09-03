@@ -7,6 +7,7 @@ import {
 } from '../schemas/instance-schemas.js';
 import { toolError } from '../utils/error-handler.js';
 import { toolResult } from '../utils/tool-response.js';
+import { transportHealth } from '../utils/transport-health.js';
 
 export const CONNECTION_STATUS_TOOL = {
 	name: 'sn_connection_status',
@@ -34,13 +35,48 @@ export function createConnectionStatusTool(instanceManager: InstanceManager) {
 		handler: async (params: unknown) => {
 			try {
 				const { instance } = ConnectionStatusSchema.parse(params);
-				const instances = instanceManager.getConnectionStatuses(instance);
+				const raw = instanceManager.getConnectionStatuses(instance);
+
+				// The transport diagnostic is a property of the transport, not of the
+				// instance, so on a multi-instance config it was the same paragraph
+				// repeated verbatim per row. Hoist it to a keyed map and drop it from
+				// the rows. Single-instance callers keep the inline field — there is
+				// nothing to deduplicate, and moving it would be churn for them.
+				const shouldHoist = raw.length > 1;
+				const transportDiagnostics: Record<string, string> = {};
+				const instances = raw.map((item) => {
+					const { diagnostic, ...transportWithoutDiagnostic } = item.backgroundScriptTransport;
+					if (shouldHoist && diagnostic) {
+						transportDiagnostics[item.backgroundScriptTransport.transport] = diagnostic;
+					}
+					// transportHealth stays per instance: scheduler latency and breaker
+					// state genuinely differ between instances.
+					const health = transportHealth(item.name);
+					return {
+						...item,
+						backgroundScriptTransport: shouldHoist
+							? transportWithoutDiagnostic
+							: item.backgroundScriptTransport,
+						...(health ? { transportHealth: health } : {}),
+					};
+				});
 				const scriptedRest = instances.filter(
 					(item) => item.backgroundScriptTransport.transport === 'scripted_rest',
 				).length;
+				// Name a slow scheduler in the summary — it is the single most
+				// actionable thing this tool can say after a run of slow scripts.
+				const slow = instances.filter((item) =>
+					Boolean((item as { transportHealth?: { note?: string } }).transportHealth?.note),
+				);
+				const slowNote =
+					slow.length > 0 ? `; slow sys_trigger scheduler on ${slow.length} instance(s)` : '';
 				return toolResult(
-					{ success: true, instances },
-					`connection status: ${instances.length} instance(s); background scripts: ${scriptedRest} scripted_rest, ${instances.length - scriptedRest} sys_trigger`,
+					{
+						success: true,
+						instances,
+						...(Object.keys(transportDiagnostics).length > 0 ? { transportDiagnostics } : {}),
+					},
+					`connection status: ${instances.length} instance(s); background scripts: ${scriptedRest} scripted_rest, ${instances.length - scriptedRest} sys_trigger${slowNote}`,
 				);
 			} catch (error) {
 				return toolError(error, { operation: 'inspect connection status' });

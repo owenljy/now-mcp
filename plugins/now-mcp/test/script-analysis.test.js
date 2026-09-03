@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractTableFieldRefs, parseEncodedQueryFields, detectWriteOperations } from '../build/utils/script-analysis.js';
+import { extractTableFieldRefs, extractReferencedTables, parseEncodedQueryFields, detectWriteOperations } from '../build/utils/script-analysis.js';
 
 function refsFor(script, table) {
   const r = extractTableFieldRefs(script).find((x) => x.table === table);
@@ -254,4 +254,78 @@ test('parseEncodedQueryFields strips operators, sort, and logical prefixes', () 
     parseEncodedQueryFields('active=true^ORpriority=1^NQstate!=6^ORDERBYnumber'),
     ['active', 'priority', 'state', 'number']
   );
+});
+
+// ── introspection members are not columns ────────────────────────────────────
+
+test('feature-detection guards on getFields/getElements are not reported as fields', () => {
+  // `gr.getFields ? ... : ...` reads the member WITHOUT parens precisely to test
+  // for its existence, so PROP_RE's paren check cannot exclude it. These are API
+  // members, and reporting them as unknown columns on a real table sends the
+  // reader chasing a schema problem that does not exist.
+  const script = `
+    var gr = new GlideRecord('incident');
+    gr.query();
+    while (gr.next()) {
+      var fields = gr.getFields ? gr.getFields() : null;
+      var els = gr.getElements ? gr.getElements() : null;
+      gs.info(gr.number);
+    }
+  `;
+  assert.deepEqual(refsFor(script, 'incident'), ['number']);
+});
+
+test('a bare member that this script calls elsewhere is treated as a method, not a column', () => {
+  // The denylist can only cover members we enumerated. A script that calls
+  // gr.someCustomProbe() and also tests for it bare is giving us the evidence
+  // directly — use it rather than guessing the member is a column.
+  const script = `
+    var gr = new GlideRecord('incident');
+    if (gr.someCustomProbe) { gr.someCustomProbe(); }
+    gr.short_description = 'x';
+  `;
+  assert.deepEqual(refsFor(script, 'incident'), ['short_description']);
+});
+
+test('a genuinely unknown column is still reported (the check must not over-suppress)', () => {
+  // The suppression above must not swallow real typos: model_categories is never
+  // called as a method, so it stays a field reference for the schema check.
+  const script = `
+    var gr = new GlideRecord('incident');
+    gr.addQuery('model_categories', 'x');
+    var f = gr.getFields ? gr.getFields() : null;
+  `;
+  assert.deepEqual(refsFor(script, 'incident'), ['model_categories']);
+});
+
+test('a method call on an UNTRACKED variable does not suppress a real field of the same name', () => {
+  // collectCalledMembers is scoped to tracked GlideRecord vars so an unrelated
+  // helper.state() elsewhere cannot hide gr.state.
+  const script = `
+    var helper = new SomeHelper();
+    helper.state();
+    var gr = new GlideRecord('incident');
+    gs.info(gr.state);
+  `;
+  assert.deepEqual(refsFor(script, 'incident'), ['state']);
+});
+
+// ── extractReferencedTables ──────────────────────────────────────────────────
+
+test('extractReferencedTables reports a table that names no column', () => {
+  // The field-keyed extractor drops this table because the script references no
+  // column — but a row-count probe is precisely the read whose zero result gets
+  // believed, so a visibility check must still see the table.
+  const script = "var gr = new GlideRecord('sn_ai_observe_scoring_provider'); gr.query(); gs.info(gr.getRowCount());";
+  assert.deepEqual(extractTableFieldRefs(script), []);
+  assert.deepEqual(extractReferencedTables(script), ['sn_ai_observe_scoring_provider']);
+});
+
+test('extractReferencedTables de-duplicates and covers GlideAggregate', () => {
+  const script = `
+    var a = new GlideRecord('incident');
+    var b = new GlideRecord('incident');
+    var c = new GlideAggregate('sys_user');
+  `;
+  assert.deepEqual(extractReferencedTables(script).sort(), ['incident', 'sys_user']);
 });

@@ -66,6 +66,9 @@ test('403 with wsAccess:disabled explains the table-level block, not a role gues
     operation: 'query',
     statusCode: 403,
     wsAccess: 'disabled',
+    // read_access on: a background script CAN see this table, so recommending
+    // one is sound here.
+    readAccess: 'enabled',
   });
   const text = hints.join(' ');
   assert.match(text, /ws_access/);
@@ -73,6 +76,89 @@ test('403 with wsAccess:disabled explains the table-level block, not a role gues
   assert.match(text, /sn_execute_background_script/);
   assert.match(text, /now-sdk query/);
   assert.doesNotMatch(text, /likely an acl.*lack the required role/i);
+});
+
+test('403 with ws_access AND read_access off warns that a global script returns a false empty', () => {
+  // The regression this guards: the old hint recommended a background script on
+  // ws_access alone. On a read_access=false table that script returns zero rows
+  // and reports success, which was read as "the table is empty" — producing a
+  // wrong root cause and a retracted recommendation.
+  const hints = failureHints('User Not Authorized', {
+    table: 'sn_ai_observe_scoring_provider',
+    operation: 'query',
+    statusCode: 403,
+    wsAccess: 'disabled',
+    readAccess: 'disabled',
+    owningScope: 'sn_ai_observe',
+  });
+  const text = hints.join(' ');
+  assert.match(text, /read_access/);
+  assert.match(text, /ZERO ROWS/i);
+  assert.match(text, /owning application scope|sn_ai_observe/i);
+  assert.match(text, /not.*conclusive|do NOT treat an empty result/i);
+  // It must not present an unqualified background script as the way to read this.
+  assert.doesNotMatch(
+    text,
+    /GlideRecordSecure is not gated by ws_access\) or now-sdk query will return real rows/,
+  );
+  // Measured in the Phase 0 spike (docs/phase0-scope-execution-spike.md):
+  // sys_trigger has NO sys_scope column, so this transport ALWAYS runs in
+  // rhino.global, and GlideRecordSecure / GlideAggregate / get(sys_id) all come
+  // back empty. The hint must state that plainly rather than implying some
+  // script formulation would work — offering a workaround that silently returns
+  // zero rows is the original bug wearing different words.
+  assert.match(text, /CANNOT read this table/);
+  assert.match(text, /sys_trigger has no scope field/);
+});
+
+test('403 with ws_access off and read_access unknown names the transport that sidesteps the doubt', () => {
+  // Originally this asserted the hint nominate NOTHING, because no route was
+  // known to work. The Phase 0 spike then verified now-sdk query reads
+  // read_access=0 tables (including ws_access=0 ones that 403 the Table API),
+  // so withholding it would now be withholding a measured answer. The hint must
+  // still flag that a background script can answer zero without erroring.
+  const hints = failureHints('User Not Authorized', {
+    table: 'x_mystery_table',
+    operation: 'query',
+    statusCode: 403,
+    wsAccess: 'disabled',
+    readAccess: 'unknown',
+  });
+  const text = hints.join(' ');
+  assert.match(text, /could not be determined|unknown/i);
+  assert.match(text, /zero silently/i);
+  assert.match(text, /now-sdk query/);
+});
+
+test('403 on a read_access=0 table rules out the script AND names now-sdk query', () => {
+  // Both halves are measured, and both matter: naming only the failing route
+  // leaves the caller stuck, and naming only the working one loses the warning
+  // that a script would have answered "empty" convincingly.
+  const hints = failureHints('User Not Authorized', {
+    table: 'sn_ai_observe_scoring_provider',
+    operation: 'query',
+    statusCode: 403,
+    wsAccess: 'disabled',
+    readAccess: 'disabled',
+    owningScope: 'sn_ai_observe',
+  });
+  const text = hints.join(' ');
+  assert.match(text, /CANNOT read this table/);
+  assert.match(text, /now-sdk query/);
+  assert.match(text, /verified/i);
+});
+
+test('403 with unknown access metadata says the safe transport cannot be determined', () => {
+  const hints = failureHints('User Not Authorized', {
+    table: 'x_mystery_table',
+    operation: 'query',
+    statusCode: 403,
+    wsAccess: 'unknown',
+    readAccess: 'unknown',
+  });
+  const text = hints.join(' ');
+  assert.match(text, /Likely an ACL/);
+  assert.match(text, /could not be read|cannot be determined/i);
 });
 
 test('403 with wsAccess:enabled keeps the ACL/role hint and notes ws_access is not the cause', () => {

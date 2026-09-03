@@ -64,6 +64,14 @@ export const ListTablesSchema = z.object({
 		.max(500)
 		.default(100)
 		.describe('Maximum number of tables to return'),
+	offset: z
+		.number()
+		.int()
+		.nonnegative()
+		.default(0)
+		.describe(
+			'Rows to skip, for paging through a broad search. Note that ranking applies WITHIN a page — page 2 is not "the next most relevant", it is the next slice of the underlying name-ordered result. Prefer a sharper filter/concept over paging.',
+		),
 });
 
 export type ListTablesInput = z.infer<typeof ListTablesSchema>;
@@ -84,6 +92,14 @@ export const FindFieldsSchema = z.object({
 		.default(25)
 		.describe(
 			'Maximum number of fields to return. Keep it small — this is a shortlist to rank, not a census. A large totalMatching means the keywords were too generic.',
+		),
+	offset: z
+		.number()
+		.int()
+		.nonnegative()
+		.default(0)
+		.describe(
+			'Rows to skip. Ranking applies WITHIN a page, so page 2 is the next slice of the name-ordered result, not the next-most-relevant rows. A sharper keyword beats paging.',
 		),
 });
 
@@ -172,4 +188,39 @@ export interface TableScopeInfo {
 	scopeSysId?: string;
 	/** Application scope api_name, e.g. "x_snc_myapp". Present only when scoped is true. */
 	scopeName?: string;
+}
+
+/**
+ * Everything sys_db_object knows about how a table can be reached, in one read.
+ *
+ * The two access flags fail in DIFFERENT layers, which is why they must be
+ * resolved together rather than one at a time:
+ *
+ *  - `ws_access` (Allow access to this table via web services) gates the REST
+ *    Table/Stats APIs. Off ⇒ every REST read 403s before any ACL runs.
+ *  - `read_access` (Can read / "Allow access to this table from web service"'s
+ *    sibling, `sys_db_object.read_access`) gates cross-scope reads. Off ⇒ a
+ *    GlideRecord running in a DIFFERENT application scope reads ZERO rows and
+ *    reports success: no exception, `isValid()` true, `canRead()` true. That
+ *    silent zero is the failure this profile exists to prevent — see the
+ *    plan's Background section.
+ *
+ * Every field except `exists` is optional and `undefined` means UNKNOWN, never
+ * false: the probe is advisory and must not manufacture an answer it could not
+ * read. Callers branch on `=== true` / `=== false` and treat `undefined` as
+ * "cannot determine the safe transport".
+ */
+export interface TableAccessProfile {
+	/** False when sys_db_object has no readable row for this name. */
+	exists: boolean;
+	/** sys_db_object.ws_access — REST Table/Stats API reachability. */
+	wsAccess?: boolean;
+	/** sys_db_object.read_access — cross-scope readability. */
+	readAccess?: boolean;
+	/** The application that owns the table, when it could be resolved. */
+	owningScope?: {
+		sysId: string;
+		/** Scope api_name, e.g. "sn_ai_observe" or "global". */
+		name: string;
+	};
 }

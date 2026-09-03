@@ -91,6 +91,20 @@ const GR_METHODS = new Set([
 	'getTableName',
 	'getUniqueValue',
 	'getEncodedQuery',
+	// Introspection members. These appear overwhelmingly in feature-detection
+	// guards — `gr.getFields ? gr.getFields() : null` — where the member is read
+	// WITHOUT parentheses precisely to test for its existence. PROP_RE's paren
+	// check can't help there, so without these entries a defensive script gets
+	// `getFields`/`getElements` reported as unknown columns on a real table.
+	'getFields',
+	'getElements',
+	'getRecordClassName',
+	'getLabel',
+	'getED',
+	'getAttribute',
+	'getClassDisplayValue',
+	'getLink',
+	'getPlural',
 	'setWorkflow',
 	'autoSysFields',
 	'setAbortAction',
@@ -274,6 +288,42 @@ export function parseEncodedQueryFields(encoded: string): string[] {
 	return fields;
 }
 
+// `someVar.member(` — a member INVOKED on a tracked GlideRecord variable.
+const METHOD_CALL_RE = /\b(\w+)\.([A-Za-z_]\w*)\s*\(/g;
+
+/**
+ * Member names the script invokes with parentheses on a tracked GlideRecord
+ * variable.
+ *
+ * Used to reclassify a bare `gr.member` read as a method probe rather than a
+ * column. Scoped to tracked variables so an unrelated `obj.foo()` elsewhere in
+ * the script can't suppress a genuine `gr.foo` field reference.
+ */
+function collectCalledMembers(script: string, varTable: Map<string, string>): Set<string> {
+	const called = new Set<string>();
+	METHOD_CALL_RE.lastIndex = 0;
+	let m: RegExpExecArray | null;
+	while ((m = METHOD_CALL_RE.exec(script)) !== null) {
+		const [, varName, member] = m;
+		if (varTable.has(varName)) called.add(member);
+	}
+	return called;
+}
+
+/**
+ * Every table the script opens a GlideRecord/GlideAggregate on, whether or not
+ * it also names a column.
+ *
+ * Distinct from extractTableFieldRefs, which drops a table that contributed no
+ * fields — correct for a FIELD check, wrong for a VISIBILITY check. The script
+ * at the centre of the silent-zero incident was `gr.query(); gr.getRowCount()`:
+ * it references no column at all, so a field-keyed extractor reports nothing
+ * and the very read that needed the warning would go unwarned.
+ */
+export function extractReferencedTables(script: string): string[] {
+	return [...new Set(buildVarTable(script).values())];
+}
+
 /**
  * Extract high-confidence {table, fields[]} references from a script.
  * Fields are only associated with a table when the GlideRecord variable was
@@ -306,6 +356,14 @@ export function extractTableFieldRefs(script: string): TableFieldRefs[] {
 		}
 	}
 
+	// Names this script itself calls as methods on a tracked variable. A
+	// feature-detection guard reads the member bare to test for it and then calls
+	// it — `gr.getFields ? gr.getFields() : []` — so the bare read is a method
+	// probe, not a column. The denylist can only cover members we thought to
+	// enumerate; this catches the rest, including instance-specific and custom
+	// script-include methods, from the script's own evidence.
+	const calledAsMethod = collectCalledMembers(script, varTable);
+
 	// Direct property access: `gr.field = x` and `gr.field` reads (the most common
 	// GlideRecord field form). Skip method calls (trailing `(`) and known API members.
 	PROP_RE.lastIndex = 0;
@@ -313,6 +371,7 @@ export function extractTableFieldRefs(script: string): TableFieldRefs[] {
 		const [, varName, prop, paren] = m;
 		if (paren) continue; // method call, not a field
 		if (GR_METHODS.has(prop)) continue; // API member referenced without ()
+		if (calledAsMethod.has(prop)) continue; // called with () elsewhere -> a method probe
 		const table = varTable.get(varName);
 		if (!table) continue; // untracked variable
 		add(table, prop);

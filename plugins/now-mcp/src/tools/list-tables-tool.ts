@@ -6,6 +6,7 @@ import { ListTablesOutputSchema } from '../schemas/output-schemas.js';
 import { ListTablesSchema } from '../schemas/schema-schemas.js';
 import type { SchemaService } from '../services/schema-service.js';
 import { toColumnar } from '../utils/columnar.js';
+import { rankItems, rankingTerms } from '../utils/discovery-ranking.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
 import { capRendered } from '../utils/render-cap.js';
@@ -26,7 +27,7 @@ filter matches the NAME: trailing * = starts-with (incident*), leading * = ends-
 
 concept matches the LABEL and the NAME, for when name matching has nothing to bite on ("the table behind this chat panel"). Keywords are OR'd; combining filter and concept ANDs them. The matched column reports which of your keywords hit each row, so a miss tells you which variant to change.
 
-Ranking is yours to do — the instance returns no relevance order. Prefer Global/core scope over an unrelated store app, prefer the base table over its satellites (check the parent column), and prefer an exactly-matching label over an incidental one.
+Rows are RANKED by relevance (exact name/label, then prefix, core scope over an unrelated store app, base tables over staging/history/metric satellites) — take the order as given rather than re-ranking. pagination.totalMatching and hasMore tell you whether this is the whole match set or a slice; ranking applies within a page, so narrow the search rather than paging for a better match.
 
 Examples:
 - All tables (first 100): no parameters
@@ -55,14 +56,22 @@ export function createListTablesTool(schemaService: SchemaService) {
 				});
 
 				// List tables
-				const tables = await schemaService.listTables(
+				const { tables, totalMatching } = await schemaService.listTables(
 					validated.filter,
 					validated.limit,
 					target.name,
 					validated.concept,
+					validated.offset,
 				);
 
-				const { columns, rows } = toColumnar(tables as unknown as Record<string, unknown>[]);
+				// Rank before rendering. The instance returns name order, so without
+				// this an exact match sorts behind any alphabetically-earlier substring
+				// hit — and if the byte cap then truncates, the row the caller actually
+				// wanted is the one dropped.
+				const terms = rankingTerms(validated.filter, validated.concept);
+				const ranked = rankItems(tables, terms).map((r) => r.item);
+
+				const { columns, rows } = toColumnar(ranked as unknown as Record<string, unknown>[]);
 				const {
 					rows: renderedRows,
 					truncated,
@@ -73,6 +82,14 @@ export function createListTablesTool(schemaService: SchemaService) {
 					reservedBytes: Buffer.byteLength(JSON.stringify(columns)),
 				});
 
+				// hasMore from the authoritative total when the instance reported one;
+				// otherwise from the page-size heuristic, which is the best available
+				// signal and still beats implying the set is complete.
+				const hasMore =
+					totalMatching !== null
+						? validated.offset + tables.length < totalMatching
+						: tables.length === validated.limit;
+
 				const response: Record<string, unknown> = {
 					success: true,
 					count: renderedRows.length,
@@ -80,11 +97,36 @@ export function createListTablesTool(schemaService: SchemaService) {
 					instance: target.name,
 					columns,
 					rows: renderedRows,
+					// Rows are relevance-ordered here, not name-ordered as the instance
+					// returned them. Stated explicitly so a caller doing its own ranking
+					// knows it is re-ranking an already-ranked list.
+					ranked: true,
+					pagination: {
+						limit: validated.limit,
+						offset: validated.offset,
+						hasMore,
+						...(totalMatching !== null ? { totalMatching } : {}),
+					},
 				};
 				if (validated.concept) response.concept = validated.concept;
 				if (truncated) {
 					response.truncated = true;
 					if (truncationReason) response.truncationReason = truncationReason;
+				}
+
+				// A shortlist the caller cannot tell is a shortlist is the failure this
+				// guards: "100 tables" reads as the complete answer when it is the first
+				// 100 of 900, and the right table may simply not be in it.
+				if (hasMore) {
+					const totalNote =
+						totalMatching !== null
+							? `${totalMatching} tables match; this page shows ${renderedRows.length}`
+							: `more tables match than this page shows`;
+					const existing = Array.isArray(response.hints) ? (response.hints as string[]) : [];
+					response.hints = [
+						`${totalNote}. Rows are ranked by relevance WITHIN this page only, so the best overall match may be outside it. Narrow with a sharper filter/concept rather than paging — a term matching hundreds of tables is usually too generic.`,
+						...existing,
+					];
 				}
 
 				// A concept search that finds nothing means the keywords were wrong,

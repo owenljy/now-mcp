@@ -10,6 +10,7 @@ import type { InstanceManager } from '../client/instance-manager.js';
 import type {
 	FieldMetadata,
 	FieldSearchItem,
+	TableAccessProfile,
 	TableListItem,
 	TableMetadata,
 	TableScopeInfo,
@@ -28,6 +29,26 @@ function normalizeSNRef(val: unknown): string | undefined {
 	if (typeof val === 'object' && val !== null) {
 		const o = val as { display_value?: string; value?: string };
 		return o.display_value || o.value || undefined;
+	}
+	return undefined;
+}
+
+/**
+ * ServiceNow booleans arrive in more than one shape depending on the endpoint
+ * and on sysparm_display_value: the string "true"/"false", a real boolean, or
+ * "1"/"0". Anything else — empty string, null, an unexpected token — is
+ * genuinely UNKNOWN and returns undefined rather than defaulting to false.
+ *
+ * The distinction is load-bearing: a `read_access` that could not be read must
+ * not be reported as "read access is off", because that would justify routing a
+ * read down a scope-restricted path on no evidence.
+ */
+function normalizeSNBoolean(val: unknown): boolean | undefined {
+	if (typeof val === 'boolean') return val;
+	if (typeof val === 'string') {
+		const v = val.trim().toLowerCase();
+		if (v === 'true' || v === '1') return true;
+		if (v === 'false' || v === '0') return false;
 	}
 	return undefined;
 }
@@ -329,46 +350,100 @@ export class SchemaService {
 	}
 
 	/**
+	 * Everything sys_db_object knows about how a table can be reached, in ONE
+	 * request: web-service access, cross-scope read access, and the owning
+	 * application scope.
+	 *
+	 * These are resolved together because choosing a safe transport needs all
+	 * three at once. `ws_access=false` alone says "REST is blocked"; it does not
+	 * say whether a background script would help. If `read_access` is ALSO false,
+	 * a global-scope GlideRecord returns zero rows *silently* — success, no
+	 * exception, `canRead()` true — so recommending a background script on
+	 * ws_access alone can turn a 403 into a confidently wrong "the table is
+	 * empty". That is exactly the failure this profile exists to prevent.
+	 *
+	 * Unknown fields come back `undefined`, never guessed as false: a probe that
+	 * could not read the flag must not be mistaken for one that read `false`.
+	 *
+	 * Best-effort: returns null on any failure (network error, the probe itself
+	 * blocked) so it can never mask or replace the original error — same pattern
+	 * as suggestTableName above. Does not call assertTableAllowed: this is an
+	 * internal advisory probe of table metadata, not a read of the blocked
+	 * table's own data.
+	 */
+	async getTableAccessProfile(
+		tableName: string,
+		instance?: string,
+	): Promise<TableAccessProfile | null> {
+		try {
+			const target = this.resolveCacheTarget(instance);
+			// Cache key is versioned (v2): v1 entries hold only {exists, wsAccess}
+			// and would satisfy a profile read while silently missing read_access
+			// and the owning scope — the two fields the whole feature turns on.
+			const cacheKey = `accessprofile:v2:${target.cacheNamespace}:${tableName}`;
+			const cached = this.getFromCache<TableAccessProfile>(cacheKey);
+			if (cached) return cached;
+
+			const resp = await target.client.get<{
+				result: Array<{
+					name: string;
+					ws_access: unknown;
+					read_access: unknown;
+					sys_scope: unknown;
+					'sys_scope.scope': unknown;
+				}>;
+			}>('/api/now/table/sys_db_object', {
+				sysparm_query: `name=${tableName}`,
+				sysparm_fields: 'name,ws_access,read_access,sys_scope,sys_scope.scope',
+				sysparm_limit: 1,
+				sysparm_exclude_reference_link: true,
+			});
+
+			const row = resp.result[0];
+			if (!row) {
+				const missing: TableAccessProfile = { exists: false };
+				this.setCache(cacheKey, missing);
+				return missing;
+			}
+
+			const scopeSysId = normalizeSNRef(row.sys_scope);
+			const scopeName = normalizeSNRef(row['sys_scope.scope']);
+			const profile: TableAccessProfile = {
+				exists: true,
+				wsAccess: normalizeSNBoolean(row.ws_access),
+				readAccess: normalizeSNBoolean(row.read_access),
+				...(scopeSysId && scopeName ? { owningScope: { sysId: scopeSysId, name: scopeName } } : {}),
+			};
+
+			this.setCache(cacheKey, profile);
+			return profile;
+		} catch (error) {
+			logger.debug(`Table access profile lookup skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+	}
+
+	/**
 	 * Check whether a table allows access via web services (sys_db_object.ws_access).
 	 * When false, the REST Table/Stats APIs reject ALL requests to the table
 	 * before any role/ACL evaluation happens — independent of the caller's
 	 * roles or admin status. Used to give a 403 a precise cause instead of a
 	 * generic "maybe you lack a role" guess.
 	 *
-	 * Best-effort: returns null on any failure (network error, the probe
-	 * itself blocked, etc.) so it can never mask or replace the original
-	 * error — same pattern as suggestTableName above. Does not call
-	 * assertTableAllowed: this is an internal advisory probe of table
-	 * metadata, not a read of the blocked table's own data.
+	 * Compatibility wrapper over getTableAccessProfile. Retained because callers
+	 * that only need the REST verdict shouldn't have to reason about the wider
+	 * profile; it collapses an unknown `wsAccess` to false, which is why new
+	 * callers that must distinguish unknown-from-off use the profile directly.
 	 */
 	async checkWebServiceAccess(
 		tableName: string,
 		instance?: string,
 	): Promise<{ exists: boolean; wsAccess: boolean } | null> {
-		try {
-			const target = this.resolveCacheTarget(instance);
-			const cacheKey = `wsaccess:${target.cacheNamespace}:${tableName}`;
-			const cached = this.getFromCache<{ exists: boolean; wsAccess: boolean }>(cacheKey);
-			if (cached) return cached;
-
-			const resp = await target.client.get<{
-				result: Array<{ name: string; ws_access: string }>;
-			}>('/api/now/table/sys_db_object', {
-				sysparm_query: `name=${tableName}`,
-				sysparm_fields: 'name,ws_access',
-				sysparm_limit: 1,
-			});
-
-			const row = resp.result[0];
-			const result = { exists: Boolean(row), wsAccess: row?.ws_access === 'true' };
-			this.setCache(cacheKey, result);
-			return result;
-		} catch (error) {
-			logger.debug(`Web-service access check skipped for ${tableName}`, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return null;
-		}
+		const profile = await this.getTableAccessProfile(tableName, instance);
+		if (!profile) return null;
+		return { exists: profile.exists, wsAccess: profile.wsAccess === true };
 	}
 
 	/**
@@ -588,14 +663,17 @@ export class SchemaService {
 		limit: number = 100,
 		instance?: string,
 		concept?: string[],
-	): Promise<TableListItem[]> {
+		offset: number = 0,
+	): Promise<{ tables: TableListItem[]; totalMatching: number | null }> {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = concept ? sanitizeKeywords(concept) : [];
 		const conceptKey = keywords.length > 0 ? keywords.join('|').toLowerCase() : 'none';
-		const cacheKey = `tables:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}:${limit}`;
+		const cacheKey = `tables:v2:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}:${limit}:${offset}`;
 
 		// Check cache first
-		const cached = this.getFromCache<TableListItem[]>(cacheKey);
+		const cached = this.getFromCache<{ tables: TableListItem[]; totalMatching: number | null }>(
+			cacheKey,
+		);
 		if (cached) {
 			logger.debug('Cache hit for table list');
 			return cached;
@@ -634,7 +712,12 @@ export class SchemaService {
 		// AND-ed conditions and silently widen the result.
 		query = appendConceptOrGroup(query, ['label', 'name'], keywords);
 
-		const response = await client.get<{
+		// getWithHeaders rather than get: X-Total-Count rides on the same response,
+		// so "how many matched in total" costs nothing extra. Without it a full page
+		// is ambiguous — the caller cannot tell "exactly 100 matches" from "the
+		// first 100 of thousands", and silently seeing a slice as the whole set is
+		// how a discovery search concludes the wrong table is the only candidate.
+		const { data: response, headers } = await client.getWithHeaders<{
 			result: Array<{
 				name: string;
 				label: string;
@@ -645,8 +728,12 @@ export class SchemaService {
 			sysparm_query: query,
 			sysparm_fields: 'name,label,super_class.name,sys_scope.scope',
 			sysparm_limit: limit,
+			sysparm_offset: offset,
 			sysparm_order_by: 'name',
 		});
+
+		const parsedTotal = Number.parseInt(headers['x-total-count'] ?? '', 10);
+		const totalMatching = Number.isFinite(parsedTotal) ? parsedTotal : null;
 
 		const tables: TableListItem[] = response.result.map((table) => {
 			const scopeName = normalizeSNRef(table['sys_scope.scope']);
@@ -666,12 +753,12 @@ export class SchemaService {
 			};
 		});
 
-		// Cache the result
-		this.setCache(cacheKey, tables);
+		const result = { tables, totalMatching };
+		this.setCache(cacheKey, result);
 
 		logger.info(`Retrieved ${tables.length} tables`);
 
-		return tables;
+		return result;
 	}
 
 	/**
@@ -685,17 +772,19 @@ export class SchemaService {
 		concept: string[],
 		limit: number = 25,
 		instance?: string,
-	): Promise<{ fields: FieldSearchItem[]; keywords: string[] }> {
+		offset: number = 0,
+	): Promise<{ fields: FieldSearchItem[]; keywords: string[]; totalMatching: number | null }> {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = sanitizeKeywords(concept);
-		if (keywords.length === 0) return { fields: [], keywords };
+		if (keywords.length === 0) return { fields: [], keywords, totalMatching: 0 };
 
-		const cacheKey = `findfields:${target.cacheNamespace}:${keywords
+		const cacheKey = `findfields:v2:${target.cacheNamespace}:${keywords
 			.join('|')
-			.toLowerCase()}:${limit}`;
+			.toLowerCase()}:${limit}:${offset}`;
 		const cached = this.getFromCache<{
 			fields: FieldSearchItem[];
 			keywords: string[];
+			totalMatching: number | null;
 		}>(cacheKey);
 		if (cached) {
 			logger.debug('Cache hit for field search');
@@ -722,7 +811,10 @@ export class SchemaService {
 		query = appendConceptOrGroup(query, ['column_label', 'element'], keywords);
 
 		const client = target.client;
-		const response = await client.get<{
+		// X-Total-Count comes free on this response and is what turns a full page
+		// from "these are the matches" into "these are 25 of 400" — the difference
+		// between a shortlist the caller can trust and one they cannot.
+		const { data: response, headers } = await client.getWithHeaders<{
 			result: Array<{
 				name: string;
 				element: string;
@@ -734,8 +826,12 @@ export class SchemaService {
 			sysparm_query: query,
 			sysparm_fields: 'name,element,column_label,internal_type,reference.name',
 			sysparm_limit: limit,
+			sysparm_offset: offset,
 			sysparm_order_by: 'name',
 		});
+
+		const parsedTotal = Number.parseInt(headers['x-total-count'] ?? '', 10);
+		const totalMatching = Number.isFinite(parsedTotal) ? parsedTotal : null;
 
 		const fields: FieldSearchItem[] = response.result.map((row) => ({
 			table: row.name,
@@ -746,7 +842,7 @@ export class SchemaService {
 			matched: matchedKeywords([row.column_label, row.element], keywords).join(','),
 		}));
 
-		const result = { fields, keywords };
+		const result = { fields, keywords, totalMatching };
 		this.setCache(cacheKey, result);
 
 		logger.info(`Found ${fields.length} field(s) matching concept`);

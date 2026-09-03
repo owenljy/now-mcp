@@ -8,8 +8,13 @@ import type { SchemaService } from '../services/schema-service.js';
 import type { ScriptService } from '../services/script-service.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
-import { detectWriteOperations, extractTableFieldRefs } from '../utils/script-analysis.js';
+import {
+	detectWriteOperations,
+	extractReferencedTables,
+	extractTableFieldRefs,
+} from '../utils/script-analysis.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
+import { recordTransportSample } from '../utils/transport-health.js';
 
 /**
  * Output guardrail. The sys_trigger execution path incidentally caps output at
@@ -21,20 +26,30 @@ import { toolResult, toolText } from '../utils/tool-response.js';
  */
 const MAX_OUTPUT_CHARS = 8000;
 
+/**
+ * Scheduler wait, in ms, above which the sys_trigger transport is worth
+ * complaining about once. Set from measured behaviour: a healthy instance
+ * dispatches a Run Once trigger in a second or two, whereas the transcript that
+ * motivated this work showed a ~31s median — time spent entirely in the queue.
+ */
+const SLOW_SCHEDULER_WAIT_MS = 10_000;
+
 export const EXECUTE_BACKGROUND_SCRIPT_TOOL = {
 	name: 'sn_execute_background_script',
 	title: 'Execute background script',
 	description: `What: Run server-side JavaScript in ServiceNow using the instance's configured execution transport: scriptApiPath when set, otherwise a temporary sys_trigger, then return logged output.
-When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for plain reads and the create/update/delete record tools for ordinary CRUD; call sn_delete_records FIRST for known-record deletion rather than GlideRecord.deleteRecord() merely because this tool is more general.
-Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the configured Scripted REST resource must be installed, active, and executable by the integration user; without it, the integration user must be able to create/read/delete temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
+When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for reads and the create/update/delete record tools for CRUD; call sn_delete_records FIRST for known-record deletion rather than GlideRecord.deleteRecord().
+Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the Scripted REST resource must be installed, active, and executable by the integration user; without it, that user must create/read/delete temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
 
-WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only — it grants no roles, bypasses no ACLs. Runtime identity/privileges come from the configured endpoint or scheduled-job context.
+WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only — it grants no roles and bypasses no ACLs. Runtime identity comes from the configured endpoint or scheduled-job context, and observedIdentity does not imply ACL bypass.
 
-Write policy (writes INSIDE the script body): requires allowWrites:true; metadata/security/config writes additionally require allowMetadataWrites:true (prefer Fluent source control). Detection is heuristic; unresolved targets yield lowConfidenceWarning.
+Write policy (writes INSIDE the script body): requires allowWrites:true; metadata/security/config writes also require allowMetadataWrites:true (prefer Fluent source control). Detection is heuristic; unresolved targets yield lowConfidenceWarning. A null/false write result is not proof of persistence — verify by rereading.
 
-Runtime (ServiceNow Rhino, NOT Node): call log(...) for output (gs.log/info/print are rewritten to it; return values discarded). Prefer gs.info over gs.print in scoped contexts. Synchronous only — no import/require/setTimeout/Promise/await. Use GlideRecordSecure + canWrite() and setLimit(). Referenced table/field names are schema-checked; unknown ones return in "schemaCheck" (advisory only).
+Runtime (ServiceNow Rhino, NOT Node): call log(...) for output (gs.log/info/print are rewritten to it; return values discarded). Synchronous only — no import/require/setTimeout/Promise/await. Use GlideRecordSecure + canWrite() and setLimit(). Referenced names are schema-checked into "schemaCheck" (advisory).
 
-runtimeContext.observedIdentity, when present, does not imply ACL bypass. A null/false write result is not proof of persistence — verify by rereading. queueDelayMs (sys_trigger path) includes queue/poll/cleanup time. transportConfiguration is echoed once per instance per process, not every call.`,
+visibilityWarnings lists referenced tables restricted to their owning scope by read_access. On those, a zero-row result is NOT evidence the table is empty.
+
+timings splits the sys_trigger duration into observedSchedulerWaitMs (queue), scriptDurationMs, cleanup and pollCount; a long total is usually queue, so configure scriptApiPath rather than trimming the script. queueDelayMs is deprecated (it reports the whole duration).`,
 	inputSchema: ExecuteBackgroundScriptSchema,
 	outputSchema: ExecuteScriptOutputSchema,
 };
@@ -47,6 +62,10 @@ export function createExecuteBackgroundScriptTool(
 	// process — echo it once per instance rather than on every call. A fresh
 	// Set per createExecuteBackgroundScriptTool() call keeps tests isolated.
 	const reportedTransportConfig = new Set<string>();
+	// Same discipline for the slow-transport advice: it's a standing property of
+	// the instance, so repeating it on every one of 61 calls would be 61 copies
+	// of one sentence the reader can act on exactly once.
+	const reportedSlowTransport = new Set<string>();
 	return {
 		...EXECUTE_BACKGROUND_SCRIPT_TOOL,
 		handler: async (params: unknown) => {
@@ -119,9 +138,15 @@ export function createExecuteBackgroundScriptTool(
 				// references against the live schema. ADVISORY ONLY — heuristic static
 				// analysis must never block a valid script, so we attach findings and
 				// still execute. Grounds the model's NEXT script with real field names.
-				const schemaCheck = schemaService
-					? await runSchemaPreflight(schemaService, validated.script, validated.instance)
-					: undefined;
+				// Visibility warnings ride alongside: both walk the same extracted table
+				// refs and both are advisory, so they share one pre-flight step rather
+				// than serializing two round-trip batches.
+				const [schemaCheck, visibilityWarnings] = schemaService
+					? await Promise.all([
+							runSchemaPreflight(schemaService, validated.script, validated.instance),
+							collectVisibilityWarnings(schemaService, validated.script, validated.instance),
+						])
+					: [undefined, undefined];
 
 				// Execute background script
 				const result = await scriptService.executeBackgroundScript(
@@ -183,9 +208,38 @@ export function createExecuteBackgroundScriptTool(
 					result.success && applicationSuccess !== false && !resultContractError;
 
 				const instanceKey = validated.instance || 'default';
+
+				// Feed the per-instance transport history so sn_connection_status can
+				// report scheduler health from evidence instead of the operator having
+				// to read individual call durations.
+				if (result.timings) {
+					recordTransportSample(instanceKey, {
+						totalDurationMs: result.timings.totalDurationMs,
+						observedSchedulerWaitMs: result.timings.observedSchedulerWaitMs,
+						pollCount: result.timings.pollCount,
+						outcome: result.outcome,
+					});
+				}
 				const reportTransportConfig =
 					result.outcome !== 'completed' || !reportedTransportConfig.has(instanceKey);
 				if (reportTransportConfig) reportedTransportConfig.add(instanceKey);
+
+				// Observed once, said once: the queue wait is a property of the
+				// instance's scheduler, and the remedy (install the Scripted REST fast
+				// path) is a one-time configuration change, not a per-call decision.
+				const schedulerWait = result.timings?.observedSchedulerWaitMs;
+				const slowTransportHint =
+					result.executionPath === 'sys_trigger' &&
+					typeof schedulerWait === 'number' &&
+					schedulerWait > SLOW_SCHEDULER_WAIT_MS &&
+					!reportedSlowTransport.has(instanceKey)
+						? `This instance's scheduler took ~${Math.round(schedulerWait / 1000)}s to pick up the ` +
+							`Run Once trigger; the script itself ran in ${result.timings?.scriptDurationMs ?? '?'}ms. ` +
+							`That wait is queue time, not script time, so simplifying the script will not help. ` +
+							`Configure scriptApiPath (a Scripted REST resource) to execute synchronously and skip ` +
+							`the scheduler entirely.`
+						: undefined;
+				if (slowTransportHint) reportedSlowTransport.add(instanceKey);
 
 				// Format response for LLM
 				const response = {
@@ -206,6 +260,8 @@ export function createExecuteBackgroundScriptTool(
 							}
 						: {}),
 					...(result.executionPath === 'sys_trigger' ? { queueDelayMs: result.executionTime } : {}),
+					...(result.timings ? { timings: result.timings } : {}),
+					...(slowTransportHint ? { transportPerformanceHint: slowTransportHint } : {}),
 					...(result.error ? { error: result.error } : {}),
 					instance: instanceKey,
 					...(reportTransportConfig
@@ -221,6 +277,7 @@ export function createExecuteBackgroundScriptTool(
 						? { runtimeContext: { observedIdentity: result.runtimeIdentity } }
 						: {}),
 					...(schemaCheck ? { schemaCheck } : {}),
+					...(visibilityWarnings ? { visibilityWarnings } : {}),
 					...(writeDetection.hasWrites && validated.allowWrites
 						? {
 								writeApproved: {
@@ -251,11 +308,20 @@ export function createExecuteBackgroundScriptTool(
 							: 'Script execution failed. Check error details above.'),
 				};
 
+				// A visibility warning is MOST dangerous on a successful run: that is
+				// precisely when a silent zero reads as a real answer. Name it in the
+				// summary so it isn't skipped over on the happy path.
+				const visibilityNote = visibilityWarnings
+					? ` — WARNING: scope-restricted table(s) ${visibilityWarnings
+							.map((w) => w.table)
+							.join(', ')}; an empty result is NOT conclusive (see visibilityWarnings)`
+					: '';
+
 				const formatted = toolResult(
 					response,
 					overallSuccess
-						? 'script ran — see output'
-						: 'script completed with failure — see outcome',
+						? `script ran — see output${visibilityNote}`
+						: `script completed with failure — see outcome${visibilityNote}`,
 				);
 				return overallSuccess ? formatted : { ...formatted, isError: true as const };
 			} catch (error) {
@@ -272,6 +338,81 @@ interface SchemaPreflightFinding {
 	table: string;
 	unknownFields?: { field: string; suggestion?: string }[];
 	note?: string;
+}
+
+interface VisibilityWarning {
+	table: string;
+	reason: string;
+	executionScope?: string;
+	emptyResultIsConclusive: boolean;
+	recommendedTransport?: string;
+}
+
+/**
+ * Flag tables this script reads that its execution scope may not fully see.
+ *
+ * `sys_db_object.read_access=false` restricts a table to its OWNING application
+ * scope. A GlideRecord for it from any other scope does not throw and does not
+ * 403 — it simply iterates zero rows while `isValid()` and `canRead()` both
+ * return true. So the script succeeds, reports "0 records", and the reader
+ * concludes the table is empty. That is not a hypothetical: it produced a wrong
+ * root-cause diagnosis and a recommendation that had to be retracted.
+ *
+ * This warns rather than blocks, per the plan: a background script can contain
+ * perfectly valid cross-scope logic that static analysis cannot understand, and
+ * the table refs themselves are only best-effort literals.
+ *
+ * The execution scope is deliberately NOT asserted here. This transport runs in
+ * a scheduled-job context whose scope this code cannot prove from the outside,
+ * so the warning states the risk and marks the result inconclusive instead of
+ * claiming to know which scope ran.
+ */
+async function collectVisibilityWarnings(
+	schemaService: SchemaService,
+	script: string,
+	instance?: string,
+): Promise<VisibilityWarning[] | undefined> {
+	try {
+		// extractReferencedTables, not extractTableFieldRefs: a table that names no
+		// column is dropped by the field-keyed extractor, and the script that
+		// triggered this whole feature — `gr.query(); gr.getRowCount()` — is
+		// exactly that shape.
+		const tables = extractReferencedTables(script);
+		if (tables.length === 0) return undefined;
+
+		const warnings: VisibilityWarning[] = [];
+		for (const table of tables) {
+			const profile = await schemaService.getTableAccessProfile(table, instance);
+			// Unknown/unreadable profile: stay silent. A warning on every table whose
+			// metadata we merely failed to read would be noise, and the schema
+			// preflight already reports unresolvable tables.
+			if (!profile?.exists || profile.readAccess !== false) continue;
+
+			const scope = profile.owningScope?.name;
+			warnings.push({
+				table,
+				reason:
+					`sys_db_object.read_access is off for ${table}, so it is readable only from its owning ` +
+					`application scope${scope ? ` (${scope})` : ''}. This script runs in global scope, so it reads ` +
+					`ZERO rows and still reports success — no exception, isValid() and canRead() both true. ` +
+					`Measured on a live instance: sys_trigger has no scope field, and no GlideRecord variant ` +
+					`(GlideRecordSecure, GlideAggregate, get() by sys_id) escapes this.`,
+				emptyResultIsConclusive: false,
+				// When REST is open the Table API is the cheapest correct route. When it
+				// is not, now-sdk query is the one verified to work: measured against
+				// ws_access=0/read_access=0 tables that 403 the Table API and read empty
+				// here, it returned real rows.
+				recommendedTransport: profile.wsAccess === true ? 'table-api' : 'now-sdk query',
+			});
+		}
+		return warnings.length > 0 ? warnings : undefined;
+	} catch (error) {
+		// Advisory infrastructure: never let it interfere with execution.
+		logger.debug('Script visibility pre-flight skipped', {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 }
 
 /**
