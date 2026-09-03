@@ -663,14 +663,17 @@ export class SchemaService {
 		limit: number = 100,
 		instance?: string,
 		concept?: string[],
-	): Promise<TableListItem[]> {
+		offset: number = 0,
+	): Promise<{ tables: TableListItem[]; totalMatching: number | null }> {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = concept ? sanitizeKeywords(concept) : [];
 		const conceptKey = keywords.length > 0 ? keywords.join('|').toLowerCase() : 'none';
-		const cacheKey = `tables:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}:${limit}`;
+		const cacheKey = `tables:v2:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}:${limit}:${offset}`;
 
 		// Check cache first
-		const cached = this.getFromCache<TableListItem[]>(cacheKey);
+		const cached = this.getFromCache<{ tables: TableListItem[]; totalMatching: number | null }>(
+			cacheKey,
+		);
 		if (cached) {
 			logger.debug('Cache hit for table list');
 			return cached;
@@ -709,7 +712,12 @@ export class SchemaService {
 		// AND-ed conditions and silently widen the result.
 		query = appendConceptOrGroup(query, ['label', 'name'], keywords);
 
-		const response = await client.get<{
+		// getWithHeaders rather than get: X-Total-Count rides on the same response,
+		// so "how many matched in total" costs nothing extra. Without it a full page
+		// is ambiguous — the caller cannot tell "exactly 100 matches" from "the
+		// first 100 of thousands", and silently seeing a slice as the whole set is
+		// how a discovery search concludes the wrong table is the only candidate.
+		const { data: response, headers } = await client.getWithHeaders<{
 			result: Array<{
 				name: string;
 				label: string;
@@ -720,8 +728,12 @@ export class SchemaService {
 			sysparm_query: query,
 			sysparm_fields: 'name,label,super_class.name,sys_scope.scope',
 			sysparm_limit: limit,
+			sysparm_offset: offset,
 			sysparm_order_by: 'name',
 		});
+
+		const parsedTotal = Number.parseInt(headers['x-total-count'] ?? '', 10);
+		const totalMatching = Number.isFinite(parsedTotal) ? parsedTotal : null;
 
 		const tables: TableListItem[] = response.result.map((table) => {
 			const scopeName = normalizeSNRef(table['sys_scope.scope']);
@@ -741,12 +753,12 @@ export class SchemaService {
 			};
 		});
 
-		// Cache the result
-		this.setCache(cacheKey, tables);
+		const result = { tables, totalMatching };
+		this.setCache(cacheKey, result);
 
 		logger.info(`Retrieved ${tables.length} tables`);
 
-		return tables;
+		return result;
 	}
 
 	/**
@@ -760,17 +772,19 @@ export class SchemaService {
 		concept: string[],
 		limit: number = 25,
 		instance?: string,
-	): Promise<{ fields: FieldSearchItem[]; keywords: string[] }> {
+		offset: number = 0,
+	): Promise<{ fields: FieldSearchItem[]; keywords: string[]; totalMatching: number | null }> {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = sanitizeKeywords(concept);
-		if (keywords.length === 0) return { fields: [], keywords };
+		if (keywords.length === 0) return { fields: [], keywords, totalMatching: 0 };
 
-		const cacheKey = `findfields:${target.cacheNamespace}:${keywords
+		const cacheKey = `findfields:v2:${target.cacheNamespace}:${keywords
 			.join('|')
-			.toLowerCase()}:${limit}`;
+			.toLowerCase()}:${limit}:${offset}`;
 		const cached = this.getFromCache<{
 			fields: FieldSearchItem[];
 			keywords: string[];
+			totalMatching: number | null;
 		}>(cacheKey);
 		if (cached) {
 			logger.debug('Cache hit for field search');
@@ -797,7 +811,10 @@ export class SchemaService {
 		query = appendConceptOrGroup(query, ['column_label', 'element'], keywords);
 
 		const client = target.client;
-		const response = await client.get<{
+		// X-Total-Count comes free on this response and is what turns a full page
+		// from "these are the matches" into "these are 25 of 400" — the difference
+		// between a shortlist the caller can trust and one they cannot.
+		const { data: response, headers } = await client.getWithHeaders<{
 			result: Array<{
 				name: string;
 				element: string;
@@ -809,8 +826,12 @@ export class SchemaService {
 			sysparm_query: query,
 			sysparm_fields: 'name,element,column_label,internal_type,reference.name',
 			sysparm_limit: limit,
+			sysparm_offset: offset,
 			sysparm_order_by: 'name',
 		});
+
+		const parsedTotal = Number.parseInt(headers['x-total-count'] ?? '', 10);
+		const totalMatching = Number.isFinite(parsedTotal) ? parsedTotal : null;
 
 		const fields: FieldSearchItem[] = response.result.map((row) => ({
 			table: row.name,
@@ -821,7 +842,7 @@ export class SchemaService {
 			matched: matchedKeywords([row.column_label, row.element], keywords).join(','),
 		}));
 
-		const result = { fields, keywords };
+		const result = { fields, keywords, totalMatching };
 		this.setCache(cacheKey, result);
 
 		logger.info(`Found ${fields.length} field(s) matching concept`);

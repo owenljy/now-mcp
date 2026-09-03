@@ -233,6 +233,21 @@ export const GetTableSchemaOutputSchema = z.object({
 });
 
 /** sn_list_tables */
+/**
+ * Paging metadata for a discovery search.
+ *
+ * `totalMatching` is the point: without it a full page is ambiguous between
+ * "these are all the matches" and "these are the first N of hundreds", and
+ * reading a slice as the whole set is how a search concludes the wrong table is
+ * the only candidate. Absent when the instance did not return X-Total-Count.
+ */
+const DiscoveryPaginationSchema = z.object({
+	limit: z.number(),
+	offset: z.number(),
+	hasMore: z.boolean(),
+	totalMatching: z.number().optional(),
+});
+
 export const ListTablesOutputSchema = z.object({
 	success: z.boolean(),
 	count: z.number(),
@@ -240,6 +255,9 @@ export const ListTablesOutputSchema = z.object({
 	concept: z.array(z.string()).optional(),
 	instance: z.string(),
 	...columnarShape('table'),
+	/** Rows are relevance-ordered, not in the instance's name order. */
+	ranked: z.boolean().optional(),
+	pagination: DiscoveryPaginationSchema.optional(),
 	truncated: z.boolean().optional(),
 	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
 	hints: z.array(z.string()).optional(),
@@ -252,6 +270,14 @@ export const FindFieldsOutputSchema = z.object({
 	concept: z.array(z.string()),
 	instance: z.string(),
 	...columnarShape('field'),
+	ranked: z.boolean().optional(),
+	pagination: DiscoveryPaginationSchema.optional(),
+	/**
+	 * How the matches spread across tables, on a broad search. A concept that
+	 * matches 40 fields on one table is a different situation from one that
+	 * matches 40 fields across 40 tables, and the shortlist alone hides which.
+	 */
+	tableDistribution: z.array(z.object({ table: z.string(), fields: z.number() })).optional(),
 	truncated: z.boolean().optional(),
 	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
 	hints: z.array(z.string()).optional(),

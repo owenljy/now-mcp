@@ -11,6 +11,7 @@ import { FindFieldsOutputSchema } from '../schemas/output-schemas.js';
 import { FindFieldsSchema } from '../schemas/schema-schemas.js';
 import type { SchemaService } from '../services/schema-service.js';
 import { toColumnar } from '../utils/columnar.js';
+import { rankItems, rankingTerms } from '../utils/discovery-ranking.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
 import { capRendered } from '../utils/render-cap.js';
@@ -29,7 +30,7 @@ Produces: {columns, rows} — one row per field (table, element, label, type, re
 
 Flow Designer's per-flow variable-pool tables (var__m_*) are always excluded: measured on a live instance they were two thirds of a result set and front-loaded, burying the genuine hits. Staging mirrors (*_ext_staging) and audit shadow tables are NOT excluded and may appear — rank them down.
 
-Ranking is yours to do — the instance returns no relevance order. A field on a widely-used base table (task, incident) usually outranks the same label on a leaf config table. Verify with sn_get_table_schema before acting on a hit: a sys_dictionary row can outlive the column it described.
+Rows are RANKED by relevance (exact column/label match, then prefix, with staging/history/audit shadows demoted) — take the order as given. pagination.totalMatching says how much of the match set you are seeing, and tableDistribution shows where a broad result clusters, which often identifies the table faster than the rows themselves. Verify with sn_get_table_schema before acting on a hit: a sys_dictionary row can outlive the column it described.
 
 Examples:
 - concept=["escalat"]
@@ -53,13 +54,28 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 					limit: validated.limit,
 				});
 
-				const { fields } = await schemaService.findFields(
+				const { fields, totalMatching } = await schemaService.findFields(
 					validated.concept,
 					validated.limit,
 					target.name,
+					validated.offset,
 				);
 
-				const { columns, rows } = toColumnar(fields as unknown as Record<string, unknown>[]);
+				// Rank on the COLUMN name and label. `name` for ranking purposes is the
+				// element, not the table: the caller asked for a field concept, so an
+				// exact column-name hit is the strongest signal available.
+				const terms = rankingTerms(undefined, validated.concept);
+				const ranked = rankItems(
+					fields.map((f) => ({ ...f, name: f.element })),
+					terms,
+				).map((r) => {
+					// Drop the synthetic `name` again so the wire shape is unchanged —
+					// rows stay {table, element, label, type, reference, matched}.
+					const { name: _ranking, ...row } = r.item;
+					return row;
+				});
+
+				const { columns, rows } = toColumnar(ranked as unknown as Record<string, unknown>[]);
 				const {
 					rows: renderedRows,
 					truncated,
@@ -70,6 +86,11 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 					reservedBytes: Buffer.byteLength(JSON.stringify(columns)),
 				});
 
+				const hasMore =
+					totalMatching !== null
+						? validated.offset + fields.length < totalMatching
+						: fields.length === validated.limit;
+
 				const response: Record<string, unknown> = {
 					success: true,
 					count: renderedRows.length,
@@ -77,7 +98,30 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 					instance: target.name,
 					columns,
 					rows: renderedRows,
+					ranked: true,
+					pagination: {
+						limit: validated.limit,
+						offset: validated.offset,
+						hasMore,
+						...(totalMatching !== null ? { totalMatching } : {}),
+					},
 				};
+
+				// On a broad result, where the matches CLUSTER is often the real answer
+				// — "40 hits, 31 of them on sys_user" points at a table far faster than
+				// reading 40 individual rows. Only worth its bytes when the set is
+				// genuinely broad and actually spread across tables.
+				if (fields.length >= 10) {
+					const counts = new Map<string, number>();
+					for (const f of fields) counts.set(f.table, (counts.get(f.table) ?? 0) + 1);
+					if (counts.size > 1) {
+						response.tableDistribution = [...counts.entries()]
+							.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+							.slice(0, 10)
+							.map(([table, count]) => ({ table, fields: count }));
+					}
+				}
+
 				if (truncated) {
 					response.truncated = true;
 					if (truncationReason) response.truncationReason = truncationReason;
@@ -91,9 +135,16 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 						'Try shorter word stems (escalat rather than escalation), and if the concept came from non-English input, translate it to English first — labels are English unless a language plugin is active.',
 						'If the concept describes a container rather than a value, the answer may be a TABLE — try sn_list_tables with concept set to the same keywords.',
 					];
-				} else if (renderedRows.length >= validated.limit) {
+				} else if (hasMore) {
+					// Now says HOW MUCH is missing rather than only that something is.
+					// "25 of 380" is a judgement the caller can act on; "there may be
+					// more" is not.
+					const scale =
+						totalMatching !== null
+							? `${totalMatching} fields match; this page shows ${renderedRows.length}`
+							: `more fields match than this page shows`;
 					response.hints = [
-						`Hit the ${validated.limit}-row limit, so this is a truncated slice of a larger match set and the best candidate may not be in it. Narrow with a sharper keyword rather than raising the limit — a keyword matching hundreds of fields is usually filler.`,
+						`${scale}. Rows are ranked within this page only, so the best overall match may be outside it. Narrow with a sharper keyword rather than paging or raising the limit — a keyword matching hundreds of fields is usually filler.`,
 					];
 				}
 

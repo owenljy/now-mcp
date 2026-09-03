@@ -64,6 +64,14 @@ export const ListTablesSchema = z.object({
 		.max(500)
 		.default(100)
 		.describe('Maximum number of tables to return'),
+	offset: z
+		.number()
+		.int()
+		.nonnegative()
+		.default(0)
+		.describe(
+			'Rows to skip, for paging through a broad search. Note that ranking applies WITHIN a page — page 2 is not "the next most relevant", it is the next slice of the underlying name-ordered result. Prefer a sharper filter/concept over paging.',
+		),
 });
 
 export type ListTablesInput = z.infer<typeof ListTablesSchema>;
@@ -84,6 +92,14 @@ export const FindFieldsSchema = z.object({
 		.default(25)
 		.describe(
 			'Maximum number of fields to return. Keep it small — this is a shortlist to rank, not a census. A large totalMatching means the keywords were too generic.',
+		),
+	offset: z
+		.number()
+		.int()
+		.nonnegative()
+		.default(0)
+		.describe(
+			'Rows to skip. Ranking applies WITHIN a page, so page 2 is the next slice of the name-ordered result, not the next-most-relevant rows. A sharper keyword beats paging.',
 		),
 });
 

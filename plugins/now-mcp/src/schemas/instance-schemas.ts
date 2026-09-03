@@ -56,7 +56,14 @@ const BackgroundScriptTransportStatusSchema = z.object({
 	usesCompanionEndpoint: z.boolean(),
 	fallbackOnFailure: z.literal(false),
 	privilegeModel: z.enum(['configured_endpoint_context', 'scheduled_job_context']),
-	diagnostic: z.string(),
+	/**
+	 * Prose explanation of the transport. Hoisted to the response-level
+	 * `transportDiagnostics` map when several instances share a transport, since
+	 * it is a property of the TRANSPORT, not of the instance — repeating the same
+	 * paragraph per instance was pure duplication. Always present when only one
+	 * instance is reported, so a single-instance caller sees no change.
+	 */
+	diagnostic: z.string().optional(),
 });
 
 /**
@@ -86,6 +93,12 @@ export const ConnectionStatusOutputSchema = z.object({
 			transportHealth: TransportHealthSchema.optional(),
 		}),
 	),
+	/**
+	 * Transport diagnostics said once, keyed by transport, when more than one
+	 * instance is reported. Breaker state and auth stay per-instance because they
+	 * genuinely differ; this prose does not.
+	 */
+	transportDiagnostics: z.record(z.string(), z.string()).optional(),
 });
 
 export const ResetConnectionOutputSchema = z.object({

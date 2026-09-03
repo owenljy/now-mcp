@@ -644,15 +644,20 @@ test('resolveTableScope serves the second call from cache (client hit once)', as
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
 });
 
-function makeListTablesClient(rows) {
+function makeListTablesClient(rows, totalCount) {
   const state = { calls: 0, params: null };
   return {
     state,
-    async get(endpoint, params) {
+    // listTables reads X-Total-Count off the same response, so the stub must
+    // supply headers as well as the body.
+    async getWithHeaders(endpoint, params) {
       state.calls++;
       state.params = params;
       assert.equal(endpoint, '/api/now/table/sys_db_object');
-      return { result: rows };
+      return {
+        data: { result: rows },
+        headers: totalCount === undefined ? {} : { 'x-total-count': String(totalCount) },
+      };
     },
   };
 }
@@ -663,7 +668,7 @@ test('listTables requests sys_scope.scope and reports it for a scoped/custom tab
   ]);
   const svc = new SchemaService(makeManager(client));
 
-  const tables = await svc.listTables('x_acme_widget', 100, 'listscoped');
+  const { tables } = await svc.listTables('x_acme_widget', 100, 'listscoped');
   assert.equal(client.state.params.sysparm_fields, 'name,label,super_class.name,sys_scope.scope');
   assert.equal(tables.length, 1);
   assert.equal(tables[0].name, 'x_acme_widget');
@@ -676,9 +681,43 @@ test('listTables omits scope for a global/OOB table (including the literal "glob
   ]);
   const svc = new SchemaService(makeManager(client));
 
-  const tables = await svc.listTables('incident', 100, 'listglobal');
+  const { tables } = await svc.listTables('incident', 100, 'listglobal');
   assert.equal(tables[0].extends, 'task');
   assert.equal(tables[0].scope, undefined);
+});
+
+test('listTables reports the total match count and honors offset', async () => {
+  const client = makeListTablesClient(
+    [{ name: 'incident', label: 'Incident', 'super_class.name': 'task', 'sys_scope.scope': 'global' }],
+    417,
+  );
+  const svc = new SchemaService(makeManager(client));
+
+  const { totalMatching } = await svc.listTables('inc', 50, 'listtotal', undefined, 100);
+  assert.equal(totalMatching, 417);
+  assert.equal(client.state.params.sysparm_offset, 100);
+  assert.equal(client.state.params.sysparm_limit, 50);
+});
+
+test('listTables reports totalMatching as null when the instance omits the header', async () => {
+  // Null, not 0: "the instance did not tell us" must not read as "no matches".
+  const client = makeListTablesClient([{ name: 'incident', label: 'Incident' }]);
+  const svc = new SchemaService(makeManager(client));
+
+  const { totalMatching } = await svc.listTables('inc', 50, 'listnototal');
+  assert.equal(totalMatching, null);
+});
+
+test('listTables caches per offset, so page 2 is not served page 1', async () => {
+  const client = makeListTablesClient([{ name: 'incident', label: 'Incident' }], 200);
+  const svc = new SchemaService(makeManager(client));
+
+  await svc.listTables('inc', 50, 'listpaged', undefined, 0);
+  assert.equal(client.state.calls, 1);
+  await svc.listTables('inc', 50, 'listpaged', undefined, 0);
+  assert.equal(client.state.calls, 1, 'same page should be cached');
+  await svc.listTables('inc', 50, 'listpaged', undefined, 50);
+  assert.equal(client.state.calls, 2, 'a different offset is a different result set');
 });
 
 /**

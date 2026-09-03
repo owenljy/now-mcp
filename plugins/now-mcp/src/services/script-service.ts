@@ -73,7 +73,10 @@ export interface ScriptExecutionTransportStatus {
 	usesCompanionEndpoint: boolean;
 	fallbackOnFailure: false;
 	privilegeModel: 'configured_endpoint_context' | 'scheduled_job_context';
-	diagnostic: string;
+	/** Always set by getExecutionTransportStatus. Optional in the type because
+	 * sn_connection_status hoists it into a shared, per-transport map when
+	 * reporting several instances, rather than repeating identical prose. */
+	diagnostic?: string;
 }
 
 function errorMessage(error: unknown): string {
