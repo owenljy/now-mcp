@@ -59,12 +59,31 @@ const BackgroundScriptTransportStatusSchema = z.object({
 	diagnostic: z.string(),
 });
 
+/**
+ * Observed background-script transport latency for one instance this session.
+ *
+ * Absent until a background script has actually run — an empty history is
+ * reported as absence rather than as zeros, which would read as "instantaneous".
+ */
+export const TransportHealthSchema = z.object({
+	samples: z.number().int().nonnegative(),
+	medianTotalDurationMs: z.number(),
+	/** Median scheduler queue wait. This, not total duration, is the number that
+	 * tells you whether the transport itself is the bottleneck. */
+	medianSchedulerWaitMs: z.number().optional(),
+	medianPollCount: z.number(),
+	timeouts: z.number().int().nonnegative(),
+	note: z.string().optional(),
+});
+
 export const ConnectionStatusOutputSchema = z.object({
 	success: z.literal(true),
 	instances: z.array(
 		BreakerStatusSchema.extend({
 			isDefault: z.boolean(),
 			backgroundScriptTransport: BackgroundScriptTransportStatusSchema,
+			/** Present once a background script has run on this instance. */
+			transportHealth: TransportHealthSchema.optional(),
 		}),
 	),
 });

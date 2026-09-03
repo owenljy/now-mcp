@@ -14,6 +14,7 @@ import {
 	extractTableFieldRefs,
 } from '../utils/script-analysis.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
+import { recordTransportSample } from '../utils/transport-health.js';
 
 /**
  * Output guardrail. The sys_trigger execution path incidentally caps output at
@@ -25,20 +26,30 @@ import { toolResult, toolText } from '../utils/tool-response.js';
  */
 const MAX_OUTPUT_CHARS = 8000;
 
+/**
+ * Scheduler wait, in ms, above which the sys_trigger transport is worth
+ * complaining about once. Set from measured behaviour: a healthy instance
+ * dispatches a Run Once trigger in a second or two, whereas the transcript that
+ * motivated this work showed a ~31s median — time spent entirely in the queue.
+ */
+const SLOW_SCHEDULER_WAIT_MS = 10_000;
+
 export const EXECUTE_BACKGROUND_SCRIPT_TOOL = {
 	name: 'sn_execute_background_script',
 	title: 'Execute background script',
 	description: `What: Run server-side JavaScript in ServiceNow using the instance's configured execution transport: scriptApiPath when set, otherwise a temporary sys_trigger, then return logged output.
-When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for plain reads and the create/update/delete record tools for ordinary CRUD; call sn_delete_records FIRST for known-record deletion rather than GlideRecord.deleteRecord() merely because this tool is more general.
-Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the configured Scripted REST resource must be installed, active, and executable by the integration user; without it, the integration user must be able to create/read/delete temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
+When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for reads and the create/update/delete record tools for CRUD; call sn_delete_records FIRST for known-record deletion rather than GlideRecord.deleteRecord().
+Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the Scripted REST resource must be installed, active, and executable by the integration user; without it, that user must create/read/delete temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
 
-WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only — it grants no roles, bypasses no ACLs. Runtime identity/privileges come from the configured endpoint or scheduled-job context.
+WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only — it grants no roles and bypasses no ACLs. Runtime identity comes from the configured endpoint or scheduled-job context, and observedIdentity does not imply ACL bypass.
 
-Write policy (writes INSIDE the script body): requires allowWrites:true; metadata/security/config writes additionally require allowMetadataWrites:true (prefer Fluent source control). Detection is heuristic; unresolved targets yield lowConfidenceWarning.
+Write policy (writes INSIDE the script body): requires allowWrites:true; metadata/security/config writes also require allowMetadataWrites:true (prefer Fluent source control). Detection is heuristic; unresolved targets yield lowConfidenceWarning. A null/false write result is not proof of persistence — verify by rereading.
 
-Runtime (ServiceNow Rhino, NOT Node): call log(...) for output (gs.log/info/print are rewritten to it; return values discarded). Prefer gs.info over gs.print in scoped contexts. Synchronous only — no import/require/setTimeout/Promise/await. Use GlideRecordSecure + canWrite() and setLimit(). Referenced table/field names are schema-checked; unknown ones return in "schemaCheck" (advisory only).
+Runtime (ServiceNow Rhino, NOT Node): call log(...) for output (gs.log/info/print are rewritten to it; return values discarded). Synchronous only — no import/require/setTimeout/Promise/await. Use GlideRecordSecure + canWrite() and setLimit(). Referenced names are schema-checked into "schemaCheck" (advisory).
 
-runtimeContext.observedIdentity, when present, does not imply ACL bypass. A null/false write result is not proof of persistence — verify by rereading. queueDelayMs (sys_trigger path) includes queue/poll/cleanup time. transportConfiguration is echoed once per instance per process, not every call.`,
+visibilityWarnings lists referenced tables restricted to their owning scope by read_access. On those, a zero-row result is NOT evidence the table is empty.
+
+timings splits the sys_trigger duration into observedSchedulerWaitMs (queue), scriptDurationMs, cleanup and pollCount; a long total is usually queue, so configure scriptApiPath rather than trimming the script. queueDelayMs is deprecated (it reports the whole duration).`,
 	inputSchema: ExecuteBackgroundScriptSchema,
 	outputSchema: ExecuteScriptOutputSchema,
 };
@@ -51,6 +62,10 @@ export function createExecuteBackgroundScriptTool(
 	// process — echo it once per instance rather than on every call. A fresh
 	// Set per createExecuteBackgroundScriptTool() call keeps tests isolated.
 	const reportedTransportConfig = new Set<string>();
+	// Same discipline for the slow-transport advice: it's a standing property of
+	// the instance, so repeating it on every one of 61 calls would be 61 copies
+	// of one sentence the reader can act on exactly once.
+	const reportedSlowTransport = new Set<string>();
 	return {
 		...EXECUTE_BACKGROUND_SCRIPT_TOOL,
 		handler: async (params: unknown) => {
@@ -193,9 +208,38 @@ export function createExecuteBackgroundScriptTool(
 					result.success && applicationSuccess !== false && !resultContractError;
 
 				const instanceKey = validated.instance || 'default';
+
+				// Feed the per-instance transport history so sn_connection_status can
+				// report scheduler health from evidence instead of the operator having
+				// to read individual call durations.
+				if (result.timings) {
+					recordTransportSample(instanceKey, {
+						totalDurationMs: result.timings.totalDurationMs,
+						observedSchedulerWaitMs: result.timings.observedSchedulerWaitMs,
+						pollCount: result.timings.pollCount,
+						outcome: result.outcome,
+					});
+				}
 				const reportTransportConfig =
 					result.outcome !== 'completed' || !reportedTransportConfig.has(instanceKey);
 				if (reportTransportConfig) reportedTransportConfig.add(instanceKey);
+
+				// Observed once, said once: the queue wait is a property of the
+				// instance's scheduler, and the remedy (install the Scripted REST fast
+				// path) is a one-time configuration change, not a per-call decision.
+				const schedulerWait = result.timings?.observedSchedulerWaitMs;
+				const slowTransportHint =
+					result.executionPath === 'sys_trigger' &&
+					typeof schedulerWait === 'number' &&
+					schedulerWait > SLOW_SCHEDULER_WAIT_MS &&
+					!reportedSlowTransport.has(instanceKey)
+						? `This instance's scheduler took ~${Math.round(schedulerWait / 1000)}s to pick up the ` +
+							`Run Once trigger; the script itself ran in ${result.timings?.scriptDurationMs ?? '?'}ms. ` +
+							`That wait is queue time, not script time, so simplifying the script will not help. ` +
+							`Configure scriptApiPath (a Scripted REST resource) to execute synchronously and skip ` +
+							`the scheduler entirely.`
+						: undefined;
+				if (slowTransportHint) reportedSlowTransport.add(instanceKey);
 
 				// Format response for LLM
 				const response = {
@@ -216,6 +260,8 @@ export function createExecuteBackgroundScriptTool(
 							}
 						: {}),
 					...(result.executionPath === 'sys_trigger' ? { queueDelayMs: result.executionTime } : {}),
+					...(result.timings ? { timings: result.timings } : {}),
+					...(slowTransportHint ? { transportPerformanceHint: slowTransportHint } : {}),
 					...(result.error ? { error: result.error } : {}),
 					instance: instanceKey,
 					...(reportTransportConfig

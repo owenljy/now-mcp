@@ -282,7 +282,33 @@ export const ExecuteScriptOutputSchema = z.object({
 	outputOriginalChars: z.number().optional(),
 	outputReturnedChars: z.number().optional(),
 	truncationReason: z.enum(['mailbox_limit', 'render_cap']).optional(),
+	/** @deprecated Reports the WHOLE execution duration, not the queue wait — the
+	 * name has always overstated what it measures. Kept for compatibility; read
+	 * `timings` instead, which separates the queue wait from script runtime. */
 	queueDelayMs: z.number().optional(),
+	/**
+	 * Where the wall-clock time actually went on the sys_trigger path.
+	 *
+	 * Reported because the single duration number invited the wrong conclusion:
+	 * a 31-second call was overwhelmingly scheduler queue, not script work, so
+	 * "make the script faster" was never the fix — installing the Scripted REST
+	 * fast path is.
+	 */
+	timings: z
+		.object({
+			totalDurationMs: z.number(),
+			/** DERIVED (total − script − cleanup), not read from the scheduler's own
+			 * clock. Absent when the script did not report its duration. */
+			observedSchedulerWaitMs: z.number().optional(),
+			scriptDurationMs: z.number().optional(),
+			cleanupDurationMs: z.number(),
+			pollCount: z.number(),
+		})
+		.optional(),
+	/** Emitted at most once per instance per process, when the scheduler wait
+	 * shows the sys_trigger transport is the bottleneck and a one-time config
+	 * change would remove it. */
+	transportPerformanceHint: z.string().optional(),
 	error: z.string().nullable().optional(),
 	instance: z.string(),
 	transportConfiguration: z
