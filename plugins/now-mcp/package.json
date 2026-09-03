@@ -1,6 +1,6 @@
 {
   "name": "now-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Fluent-native Model Context Protocol server for ServiceNow runtime data, schema, scripts, attachments, and diagnostics.",
   "type": "module",
   "repository": {
