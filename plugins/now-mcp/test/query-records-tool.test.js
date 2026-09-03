@@ -12,12 +12,12 @@ function makeThrowingTableService(error) {
   };
 }
 
-/** A SchemaService stub that records calls and returns a canned checkWebServiceAccess result. */
+/** A SchemaService stub that records calls and returns a canned access profile. */
 function makeStubSchemaService(result) {
   const calls = [];
   return {
     calls,
-    async checkWebServiceAccess(tableName, instance) {
+    async getTableAccessProfile(tableName, instance) {
       calls.push({ tableName, instance });
       return result;
     },
@@ -92,7 +92,7 @@ const REAL_403 = () =>
 
 test('403 with ws_access disabled explains the table-level block', async () => {
   const tableService = makeThrowingTableService(REAL_403());
-  const schemaService = makeStubSchemaService({ exists: true, wsAccess: false });
+  const schemaService = makeStubSchemaService({ exists: true, wsAccess: false, readAccess: true });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
   const result = await tool.handler({ tableName: 'sn_grc_indicator', limit: 5 });
@@ -109,7 +109,7 @@ test('403 with ws_access disabled explains the table-level block', async () => {
 
 test('403 with ws_access enabled keeps the ACL/role hint', async () => {
   const tableService = makeThrowingTableService(REAL_403());
-  const schemaService = makeStubSchemaService({ exists: true, wsAccess: true });
+  const schemaService = makeStubSchemaService({ exists: true, wsAccess: true, readAccess: true });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
   const result = await tool.handler({ tableName: 'incident', limit: 5 });
@@ -117,6 +117,30 @@ test('403 with ws_access enabled keeps the ACL/role hint', async () => {
   const text = result.content.map((c) => c.text).join(' ');
   assert.match(text, /ACL/);
   assert.match(text, /Web-service access.*enabled/i);
+});
+
+test('403 on a scope-restricted table warns against trusting a global background script', async () => {
+  // End-to-end shape of the original incident: sn_ai_observe_scoring_provider
+  // had ws_access=0 AND read_access=0, so REST 403'd and the background-script
+  // fallback the hint recommended silently returned zero rows.
+  const tableService = makeThrowingTableService(REAL_403());
+  const schemaService = makeStubSchemaService({
+    exists: true,
+    wsAccess: false,
+    readAccess: false,
+    owningScope: { sysId: 'abc123', name: 'sn_ai_observe' },
+  });
+  const tool = createQueryRecordsTool(tableService, schemaService);
+
+  const result = await tool.handler({
+    tableName: 'sn_ai_observe_scoring_provider',
+    limit: 5,
+  });
+
+  const text = result.content.map((c) => c.text).join(' ');
+  assert.match(text, /read_access/);
+  assert.match(text, /ZERO ROWS/i);
+  assert.match(text, /sn_ai_observe/, 'the owning scope should be named');
 });
 
 test('403 falls back to the generic ACL hint when the ws_access probe itself fails', async () => {
@@ -138,7 +162,7 @@ test('client-side SERVICENOW_BLOCKED_TABLES denial never triggers the ws_access 
     list: 'SERVICENOW_BLOCKED_TABLES',
   });
   const tableService = makeThrowingTableService(blockedError);
-  const schemaService = makeStubSchemaService({ exists: true, wsAccess: false });
+  const schemaService = makeStubSchemaService({ exists: true, wsAccess: false, readAccess: true });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
   await tool.handler({ tableName: 'sn_grc_indicator', limit: 5 });
@@ -150,7 +174,7 @@ test('a non-403 error never triggers the ws_access probe', async () => {
   const notFound = new AccessDeniedError('placeholder');
   notFound.statusCode = 404;
   const tableService = makeThrowingTableService(notFound);
-  const schemaService = makeStubSchemaService({ exists: true, wsAccess: false });
+  const schemaService = makeStubSchemaService({ exists: true, wsAccess: false, readAccess: true });
   const tool = createQueryRecordsTool(tableService, schemaService);
 
   await tool.handler({ tableName: 'incident', limit: 5 });

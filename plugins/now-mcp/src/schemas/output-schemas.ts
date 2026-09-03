@@ -311,6 +311,31 @@ export const ExecuteScriptOutputSchema = z.object({
 		})
 		.optional(),
 	schemaCheck: z.array(OpenRecord).optional(),
+	/**
+	 * Tables the script reads that the chosen execution scope may not fully see.
+	 *
+	 * Emitted when a referenced table has sys_db_object.read_access off: such a
+	 * table is readable only from its owning application scope, and a script in
+	 * another scope gets ZERO ROWS with no error. Without this warning an empty
+	 * result is indistinguishable from "the table really is empty" — the exact
+	 * mistake that produced a wrong root cause and a retracted recommendation.
+	 *
+	 * Advisory, never blocking: static analysis cannot know that a cross-scope
+	 * read was invalid, and legitimate scripts do read tables they can see.
+	 */
+	visibilityWarnings: z
+		.array(
+			z.object({
+				table: z.string(),
+				reason: z.string(),
+				/** The scope the script is believed to run in, when known. */
+				executionScope: z.string().optional(),
+				/** False ⇒ an empty result from this script proves nothing about the table. */
+				emptyResultIsConclusive: z.boolean(),
+				recommendedTransport: z.string().optional(),
+			}),
+		)
+		.optional(),
 	// Present when allowWrites:true and writes were detected — echoes the approved
 	// write calls (and a warning if any hit metadata/config tables).
 	writeApproved: z

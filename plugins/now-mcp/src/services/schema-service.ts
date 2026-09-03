@@ -10,6 +10,7 @@ import type { InstanceManager } from '../client/instance-manager.js';
 import type {
 	FieldMetadata,
 	FieldSearchItem,
+	TableAccessProfile,
 	TableListItem,
 	TableMetadata,
 	TableScopeInfo,
@@ -28,6 +29,26 @@ function normalizeSNRef(val: unknown): string | undefined {
 	if (typeof val === 'object' && val !== null) {
 		const o = val as { display_value?: string; value?: string };
 		return o.display_value || o.value || undefined;
+	}
+	return undefined;
+}
+
+/**
+ * ServiceNow booleans arrive in more than one shape depending on the endpoint
+ * and on sysparm_display_value: the string "true"/"false", a real boolean, or
+ * "1"/"0". Anything else — empty string, null, an unexpected token — is
+ * genuinely UNKNOWN and returns undefined rather than defaulting to false.
+ *
+ * The distinction is load-bearing: a `read_access` that could not be read must
+ * not be reported as "read access is off", because that would justify routing a
+ * read down a scope-restricted path on no evidence.
+ */
+function normalizeSNBoolean(val: unknown): boolean | undefined {
+	if (typeof val === 'boolean') return val;
+	if (typeof val === 'string') {
+		const v = val.trim().toLowerCase();
+		if (v === 'true' || v === '1') return true;
+		if (v === 'false' || v === '0') return false;
 	}
 	return undefined;
 }
@@ -329,46 +350,100 @@ export class SchemaService {
 	}
 
 	/**
+	 * Everything sys_db_object knows about how a table can be reached, in ONE
+	 * request: web-service access, cross-scope read access, and the owning
+	 * application scope.
+	 *
+	 * These are resolved together because choosing a safe transport needs all
+	 * three at once. `ws_access=false` alone says "REST is blocked"; it does not
+	 * say whether a background script would help. If `read_access` is ALSO false,
+	 * a global-scope GlideRecord returns zero rows *silently* — success, no
+	 * exception, `canRead()` true — so recommending a background script on
+	 * ws_access alone can turn a 403 into a confidently wrong "the table is
+	 * empty". That is exactly the failure this profile exists to prevent.
+	 *
+	 * Unknown fields come back `undefined`, never guessed as false: a probe that
+	 * could not read the flag must not be mistaken for one that read `false`.
+	 *
+	 * Best-effort: returns null on any failure (network error, the probe itself
+	 * blocked) so it can never mask or replace the original error — same pattern
+	 * as suggestTableName above. Does not call assertTableAllowed: this is an
+	 * internal advisory probe of table metadata, not a read of the blocked
+	 * table's own data.
+	 */
+	async getTableAccessProfile(
+		tableName: string,
+		instance?: string,
+	): Promise<TableAccessProfile | null> {
+		try {
+			const target = this.resolveCacheTarget(instance);
+			// Cache key is versioned (v2): v1 entries hold only {exists, wsAccess}
+			// and would satisfy a profile read while silently missing read_access
+			// and the owning scope — the two fields the whole feature turns on.
+			const cacheKey = `accessprofile:v2:${target.cacheNamespace}:${tableName}`;
+			const cached = this.getFromCache<TableAccessProfile>(cacheKey);
+			if (cached) return cached;
+
+			const resp = await target.client.get<{
+				result: Array<{
+					name: string;
+					ws_access: unknown;
+					read_access: unknown;
+					sys_scope: unknown;
+					'sys_scope.scope': unknown;
+				}>;
+			}>('/api/now/table/sys_db_object', {
+				sysparm_query: `name=${tableName}`,
+				sysparm_fields: 'name,ws_access,read_access,sys_scope,sys_scope.scope',
+				sysparm_limit: 1,
+				sysparm_exclude_reference_link: true,
+			});
+
+			const row = resp.result[0];
+			if (!row) {
+				const missing: TableAccessProfile = { exists: false };
+				this.setCache(cacheKey, missing);
+				return missing;
+			}
+
+			const scopeSysId = normalizeSNRef(row.sys_scope);
+			const scopeName = normalizeSNRef(row['sys_scope.scope']);
+			const profile: TableAccessProfile = {
+				exists: true,
+				wsAccess: normalizeSNBoolean(row.ws_access),
+				readAccess: normalizeSNBoolean(row.read_access),
+				...(scopeSysId && scopeName ? { owningScope: { sysId: scopeSysId, name: scopeName } } : {}),
+			};
+
+			this.setCache(cacheKey, profile);
+			return profile;
+		} catch (error) {
+			logger.debug(`Table access profile lookup skipped for ${tableName}`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+	}
+
+	/**
 	 * Check whether a table allows access via web services (sys_db_object.ws_access).
 	 * When false, the REST Table/Stats APIs reject ALL requests to the table
 	 * before any role/ACL evaluation happens — independent of the caller's
 	 * roles or admin status. Used to give a 403 a precise cause instead of a
 	 * generic "maybe you lack a role" guess.
 	 *
-	 * Best-effort: returns null on any failure (network error, the probe
-	 * itself blocked, etc.) so it can never mask or replace the original
-	 * error — same pattern as suggestTableName above. Does not call
-	 * assertTableAllowed: this is an internal advisory probe of table
-	 * metadata, not a read of the blocked table's own data.
+	 * Compatibility wrapper over getTableAccessProfile. Retained because callers
+	 * that only need the REST verdict shouldn't have to reason about the wider
+	 * profile; it collapses an unknown `wsAccess` to false, which is why new
+	 * callers that must distinguish unknown-from-off use the profile directly.
 	 */
 	async checkWebServiceAccess(
 		tableName: string,
 		instance?: string,
 	): Promise<{ exists: boolean; wsAccess: boolean } | null> {
-		try {
-			const target = this.resolveCacheTarget(instance);
-			const cacheKey = `wsaccess:${target.cacheNamespace}:${tableName}`;
-			const cached = this.getFromCache<{ exists: boolean; wsAccess: boolean }>(cacheKey);
-			if (cached) return cached;
-
-			const resp = await target.client.get<{
-				result: Array<{ name: string; ws_access: string }>;
-			}>('/api/now/table/sys_db_object', {
-				sysparm_query: `name=${tableName}`,
-				sysparm_fields: 'name,ws_access',
-				sysparm_limit: 1,
-			});
-
-			const row = resp.result[0];
-			const result = { exists: Boolean(row), wsAccess: row?.ws_access === 'true' };
-			this.setCache(cacheKey, result);
-			return result;
-		} catch (error) {
-			logger.debug(`Web-service access check skipped for ${tableName}`, {
-				error: error instanceof Error ? error.message : String(error),
-			});
-			return null;
-		}
+		const profile = await this.getTableAccessProfile(tableName, instance);
+		if (!profile) return null;
+		return { exists: profile.exists, wsAccess: profile.wsAccess === true };
 	}
 
 	/**

@@ -424,16 +424,22 @@ test('disk cache identity includes URL when the same profile name is repointed',
   assert.equal(second.state.dictionaryCalls, 1, 'repointed profile must not consume old disk cache');
 });
 
-function makeWsAccessClient(wsAccessValue) {
+function makeWsAccessClient(wsAccessValue, extraRow = {}) {
   const state = { calls: 0 };
   return {
     state,
     async get(endpoint, params) {
       state.calls++;
       assert.equal(endpoint, '/api/now/table/sys_db_object');
-      assert.equal(params.sysparm_fields, 'name,ws_access');
+      // One request resolves the whole access profile: both gating flags plus
+      // the owning scope. Fetching them separately is what allowed a 403 hint
+      // to recommend a transport without knowing whether it would silently
+      // return zero rows.
+      assert.equal(params.sysparm_fields, 'name,ws_access,read_access,sys_scope,sys_scope.scope');
       if (wsAccessValue === undefined) return { result: [] };
-      return { result: [{ name: 'sn_grc_indicator', ws_access: wsAccessValue }] };
+      return {
+        result: [{ name: 'sn_grc_indicator', ws_access: wsAccessValue, ...extraRow }],
+      };
     },
   };
 }
@@ -462,6 +468,18 @@ test('checkWebServiceAccess reports exists:false for a table with no sys_db_obje
   assert.deepEqual(result, { exists: false, wsAccess: false });
 });
 
+test('checkWebServiceAccess collapses an unknown ws_access to false for its boolean contract', async () => {
+  // The wrapper's callers only ask "is REST blocked?" and cannot express
+  // unknown. Callers that must tell unknown from off use getTableAccessProfile.
+  const client = makeWsAccessClient('', { read_access: 'true' });
+  const svc = new SchemaService(makeManager(client));
+
+  assert.deepEqual(await svc.checkWebServiceAccess('incident', 'wsunknown'), {
+    exists: true,
+    wsAccess: false,
+  });
+});
+
 test('checkWebServiceAccess returns null (not a throw) when the probe itself fails', async () => {
   const client = {
     async get() {
@@ -483,6 +501,84 @@ test('checkWebServiceAccess serves the second call from cache (client hit once)'
 
   await svc.checkWebServiceAccess('sn_grc_indicator', 'wscache');
   assert.equal(client.state.calls, 1, 'second call should be served from cache');
+});
+
+// ── getTableAccessProfile ────────────────────────────────────────────────────
+
+test('getTableAccessProfile resolves both gating flags and the owning scope in one read', async () => {
+  const client = makeWsAccessClient('false', {
+    read_access: 'false',
+    sys_scope: 'a1b2c3',
+    'sys_scope.scope': 'sn_ai_observe',
+  });
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('sn_grc_indicator', 'profile_full');
+  assert.deepEqual(profile, {
+    exists: true,
+    wsAccess: false,
+    readAccess: false,
+    owningScope: { sysId: 'a1b2c3', name: 'sn_ai_observe' },
+  });
+  assert.equal(client.state.calls, 1, 'the whole profile must cost one request, not three');
+});
+
+test('getTableAccessProfile reports an unreadable flag as undefined, never as false', async () => {
+  // The distinction is load-bearing: "read_access is off" justifies calling a
+  // zero-row script result inconclusive, whereas "we could not read the flag"
+  // justifies nothing. Collapsing the two would invent evidence.
+  const client = makeWsAccessClient('true', { read_access: '' });
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('incident', 'profile_unknown');
+  assert.equal(profile.wsAccess, true);
+  assert.equal(profile.readAccess, undefined, 'an empty flag is unknown, not false');
+});
+
+test('getTableAccessProfile normalizes the boolean shapes ServiceNow actually returns', async () => {
+  for (const [raw, expected] of [
+    ['true', true],
+    ['false', false],
+    [true, true],
+    [false, false],
+    ['1', true],
+    ['0', false],
+    ['', undefined],
+    [null, undefined],
+  ]) {
+    const client = makeWsAccessClient('true', { read_access: raw });
+    const svc = new SchemaService(makeManager(client));
+    const profile = await svc.getTableAccessProfile('incident', `norm_${String(raw)}`);
+    assert.equal(profile.readAccess, expected, `read_access ${JSON.stringify(raw)}`);
+  }
+});
+
+test('getTableAccessProfile reports exists:false for a table with no sys_db_object row', async () => {
+  const client = makeWsAccessClient(undefined);
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('nope_not_a_table', 'profile_missing');
+  assert.deepEqual(profile, { exists: false });
+});
+
+test('getTableAccessProfile returns null (not a throw) when the probe itself fails', async () => {
+  const svc = new SchemaService(
+    makeManager({
+      async get() {
+        throw new Error('network error');
+      },
+    }),
+  );
+
+  assert.equal(await svc.getTableAccessProfile('incident', 'profile_failure'), null);
+});
+
+test('getTableAccessProfile omits owningScope when the scope cannot be resolved', async () => {
+  const client = makeWsAccessClient('true', { read_access: 'true', sys_scope: '', 'sys_scope.scope': '' });
+  const svc = new SchemaService(makeManager(client));
+
+  const profile = await svc.getTableAccessProfile('incident', 'profile_noscope');
+  assert.equal(profile.owningScope, undefined);
 });
 
 function makeTableScopeClient(row) {

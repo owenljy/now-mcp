@@ -8,7 +8,11 @@ import type { SchemaService } from '../services/schema-service.js';
 import type { ScriptService } from '../services/script-service.js';
 import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
-import { detectWriteOperations, extractTableFieldRefs } from '../utils/script-analysis.js';
+import {
+	detectWriteOperations,
+	extractReferencedTables,
+	extractTableFieldRefs,
+} from '../utils/script-analysis.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
 
 /**
@@ -119,9 +123,15 @@ export function createExecuteBackgroundScriptTool(
 				// references against the live schema. ADVISORY ONLY — heuristic static
 				// analysis must never block a valid script, so we attach findings and
 				// still execute. Grounds the model's NEXT script with real field names.
-				const schemaCheck = schemaService
-					? await runSchemaPreflight(schemaService, validated.script, validated.instance)
-					: undefined;
+				// Visibility warnings ride alongside: both walk the same extracted table
+				// refs and both are advisory, so they share one pre-flight step rather
+				// than serializing two round-trip batches.
+				const [schemaCheck, visibilityWarnings] = schemaService
+					? await Promise.all([
+							runSchemaPreflight(schemaService, validated.script, validated.instance),
+							collectVisibilityWarnings(schemaService, validated.script, validated.instance),
+						])
+					: [undefined, undefined];
 
 				// Execute background script
 				const result = await scriptService.executeBackgroundScript(
@@ -221,6 +231,7 @@ export function createExecuteBackgroundScriptTool(
 						? { runtimeContext: { observedIdentity: result.runtimeIdentity } }
 						: {}),
 					...(schemaCheck ? { schemaCheck } : {}),
+					...(visibilityWarnings ? { visibilityWarnings } : {}),
 					...(writeDetection.hasWrites && validated.allowWrites
 						? {
 								writeApproved: {
@@ -251,11 +262,20 @@ export function createExecuteBackgroundScriptTool(
 							: 'Script execution failed. Check error details above.'),
 				};
 
+				// A visibility warning is MOST dangerous on a successful run: that is
+				// precisely when a silent zero reads as a real answer. Name it in the
+				// summary so it isn't skipped over on the happy path.
+				const visibilityNote = visibilityWarnings
+					? ` — WARNING: scope-restricted table(s) ${visibilityWarnings
+							.map((w) => w.table)
+							.join(', ')}; an empty result is NOT conclusive (see visibilityWarnings)`
+					: '';
+
 				const formatted = toolResult(
 					response,
 					overallSuccess
-						? 'script ran — see output'
-						: 'script completed with failure — see outcome',
+						? `script ran — see output${visibilityNote}`
+						: `script completed with failure — see outcome${visibilityNote}`,
 				);
 				return overallSuccess ? formatted : { ...formatted, isError: true as const };
 			} catch (error) {
@@ -272,6 +292,78 @@ interface SchemaPreflightFinding {
 	table: string;
 	unknownFields?: { field: string; suggestion?: string }[];
 	note?: string;
+}
+
+interface VisibilityWarning {
+	table: string;
+	reason: string;
+	executionScope?: string;
+	emptyResultIsConclusive: boolean;
+	recommendedTransport?: string;
+}
+
+/**
+ * Flag tables this script reads that its execution scope may not fully see.
+ *
+ * `sys_db_object.read_access=false` restricts a table to its OWNING application
+ * scope. A GlideRecord for it from any other scope does not throw and does not
+ * 403 — it simply iterates zero rows while `isValid()` and `canRead()` both
+ * return true. So the script succeeds, reports "0 records", and the reader
+ * concludes the table is empty. That is not a hypothetical: it produced a wrong
+ * root-cause diagnosis and a recommendation that had to be retracted.
+ *
+ * This warns rather than blocks, per the plan: a background script can contain
+ * perfectly valid cross-scope logic that static analysis cannot understand, and
+ * the table refs themselves are only best-effort literals.
+ *
+ * The execution scope is deliberately NOT asserted here. This transport runs in
+ * a scheduled-job context whose scope this code cannot prove from the outside,
+ * so the warning states the risk and marks the result inconclusive instead of
+ * claiming to know which scope ran.
+ */
+async function collectVisibilityWarnings(
+	schemaService: SchemaService,
+	script: string,
+	instance?: string,
+): Promise<VisibilityWarning[] | undefined> {
+	try {
+		// extractReferencedTables, not extractTableFieldRefs: a table that names no
+		// column is dropped by the field-keyed extractor, and the script that
+		// triggered this whole feature — `gr.query(); gr.getRowCount()` — is
+		// exactly that shape.
+		const tables = extractReferencedTables(script);
+		if (tables.length === 0) return undefined;
+
+		const warnings: VisibilityWarning[] = [];
+		for (const table of tables) {
+			const profile = await schemaService.getTableAccessProfile(table, instance);
+			// Unknown/unreadable profile: stay silent. A warning on every table whose
+			// metadata we merely failed to read would be noise, and the schema
+			// preflight already reports unresolvable tables.
+			if (!profile?.exists || profile.readAccess !== false) continue;
+
+			const scope = profile.owningScope?.name;
+			warnings.push({
+				table,
+				reason:
+					`sys_db_object.read_access is off for ${table}, so it is readable only from its owning ` +
+					`application scope${scope ? ` (${scope})` : ''}. A script running in any other scope reads ` +
+					`ZERO rows and still reports success — no exception, isValid() and canRead() both true.`,
+				emptyResultIsConclusive: false,
+				recommendedTransport:
+					profile.wsAccess === true
+						? 'table-api'
+						: 'owning-scope execution (verify with gs.getCurrentScopeName()) or now-sdk query',
+			});
+		}
+		return warnings.length > 0 ? warnings : undefined;
+	} catch (error) {
+		// Advisory infrastructure: never let it interfere with execution.
+		logger.debug('Script visibility pre-flight skipped', {
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return undefined;
+	}
 }
 
 /**

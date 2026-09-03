@@ -29,6 +29,21 @@ export interface FailureContext {
 	 * 'unknown' when the probe wasn't run or couldn't determine an answer. */
 	wsAccess?: 'disabled' | 'enabled' | 'unknown';
 	/**
+	 * Whether the target table's `sys_db_object.read_access` flag was found to be
+	 * off. This is a DIFFERENT gate from ws_access and fails in a far more
+	 * dangerous way: REST returns an honest 403, but a GlideRecord running in
+	 * another application scope returns ZERO ROWS and reports success — no
+	 * exception, `isValid()` true, `canRead()` true.
+	 *
+	 * It is tracked here so a 403 hint never recommends "just use a background
+	 * script" on a table where that script would silently answer "empty" and be
+	 * believed. 'unknown' when the probe wasn't run or couldn't determine it.
+	 */
+	readAccess?: 'disabled' | 'enabled' | 'unknown';
+	/** Owning application scope (sys_db_object.sys_scope.scope), when resolved.
+	 * Named in hints so the reader knows which scope a read must run in. */
+	owningScope?: string;
+	/**
 	 * Dictionary type/length for the fields named in `query`, when the caller
 	 * has the schema in hand. Used ONLY to decide whether a groupBy suggestion
 	 * would help — omit it and that suggestion is simply withheld, never guessed.
@@ -104,12 +119,35 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 			];
 		case '403': {
 			if (ctx.wsAccess === 'disabled') {
-				return [
-					`${table} has "Allow access to this table via web services" (sys_db_object.ws_access) turned off. This blocks ALL REST/Table API access to the table before any role or ACL check runs — it is not a role problem, and admin does not override it.`,
+				const scopeNote = ctx.owningScope ? ` (owning scope: ${ctx.owningScope})` : '';
+				const hints = [
+					`${table} has "Allow access to this table via web services" (sys_db_object.ws_access) turned off${scopeNote}. This blocks ALL REST/Table API access to the table before any role or ACL check runs — it is not a role problem, and admin does not override it.`,
 					'This is often an intentional restriction on sensitive tables (e.g. GRC). Confirm with a table owner/admin before changing it — it is a security-posture setting, not a bug to route around silently.',
-					'To read this data without changing the setting: sn_execute_background_script (GlideRecordSecure is not gated by ws_access) or now-sdk query (authenticates via a UI session, which ServiceNow does not treat as a web-service call).',
-					'If it does need to change, that is a table-definition change and belongs in the Fluent SDK (now-sdk), not a direct sys_db_object write.',
 				];
+
+				// The fallback advice depends ENTIRELY on read_access, because that
+				// flag decides whether a background script answers honestly or
+				// silently lies. Recommending a script without checking it is how a
+				// 403 becomes a confident, wrong "the table is empty".
+				if (ctx.readAccess === 'disabled') {
+					hints.push(
+						`${table} ALSO has sys_db_object.read_access off, so it is readable only from its own application scope${scopeNote}. A background script running in global scope will return ZERO ROWS and report success — no error, isValid() and canRead() both true. Do NOT treat an empty result from a global-scope script as evidence the table is empty.`,
+						"A read here must execute in the table's owning application scope. now-sdk query (a UI session, which ServiceNow does not treat as a web-service call) is the reliable check; if you do run a script, prove the scope with gs.getCurrentScopeName() and treat any zero-row result from global scope as inconclusive.",
+					);
+				} else if (ctx.readAccess === 'enabled') {
+					hints.push(
+						'read_access is on, so this table IS readable from another scope: sn_execute_background_script (GlideRecordSecure is not gated by ws_access) or now-sdk query will return real rows.',
+					);
+				} else {
+					hints.push(
+						'read_access for this table could not be determined, so the safe transport is unknown. If it is off, a global-scope background script returns zero rows silently rather than erroring — check sys_db_object.read_access before trusting an empty script result. now-sdk query avoids the ambiguity.',
+					);
+				}
+
+				hints.push(
+					'If the flag does need to change, that is a table-definition change and belongs in the Fluent SDK (now-sdk), not a direct sys_db_object write.',
+				);
+				return hints;
 			}
 			const roleNote = ctx.requiredRoles?.length
 				? ` This tool requires the ${ctx.requiredRoles.join(' or ')} role.`
@@ -121,6 +159,14 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 			const hints = [
 				`Access denied on ${table}. Likely an ACL — the account may lack the required role, or the field/record is restricted.${roleNote}${aclNote}`,
 			];
+			if (ctx.wsAccess === 'unknown') {
+				// Without the flag we cannot tell a role/ACL denial from a table-wide
+				// REST block, and the two have opposite remediations. Say so instead
+				// of nominating a transport on no evidence.
+				hints.push(
+					`Table-level access metadata (sys_db_object.ws_access / read_access) could not be read for ${table}, so the safe transport cannot be determined from here: this may be a role/ACL denial OR a table-wide web-service block. Check those two flags before switching transports — in particular, if read_access is off, a global-scope background script returns zero rows silently instead of erroring.`,
+				);
+			}
 			if (ctx.operation === 'update') {
 				hints.push(
 					'Use sn_diagnose_mutation to distinguish missing effective write ACL coverage from an existing ACL whose role, condition, script, or field rule denied the caller.',

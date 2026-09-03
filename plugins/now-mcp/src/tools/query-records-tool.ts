@@ -449,42 +449,69 @@ export function createQueryRecordsTool(
 				});
 			} catch (error) {
 				logger.error('Error querying records', error);
-				const wsAccess = await probeWebServiceAccess(error, tableName, instance, schemaService);
+				const access = await probeTableAccess(error, tableName, instance, schemaService);
 				return toolError(error, {
 					table: tableName,
 					query: undefined,
 					operation: 'query',
-					wsAccess,
+					...access,
 				});
 			}
 		},
 	};
 }
 
+/** The access facts a 403 hint needs, in the tri-state form FailureContext uses. */
+interface ProbedTableAccess {
+	wsAccess: 'disabled' | 'enabled' | 'unknown';
+	readAccess: 'disabled' | 'enabled' | 'unknown';
+	owningScope?: string;
+}
+
+const ACCESS_UNKNOWN: ProbedTableAccess = { wsAccess: 'unknown', readAccess: 'unknown' };
+
+/** boolean|undefined (unknown) → the tri-state the hint text branches on. */
+function accessState(value: boolean | undefined): 'disabled' | 'enabled' | 'unknown' {
+	if (value === true) return 'enabled';
+	if (value === false) return 'disabled';
+	return 'unknown';
+}
+
 /**
  * On a genuine server-side 403 (not the client-side SERVICENOW_BLOCKED_TABLES/
- * ALLOWED_TABLES check, which already carries its own precise hint), probe
- * whether the table's web-service access is disabled — the actual cause of a
- * whole class of 403s that have nothing to do with roles/ACLs. Best-effort:
- * any failure of the probe itself falls back to 'unknown' so it never masks
- * the original error.
+ * ALLOWED_TABLES check, which already carries its own precise hint), probe the
+ * table's access profile — the actual cause of a whole class of 403s that have
+ * nothing to do with roles/ACLs.
+ *
+ * Both flags are fetched, not just ws_access, because they select DIFFERENT
+ * remediations: ws_access=false says REST is blocked, but only read_access
+ * tells you whether the background-script fallback would return real rows or
+ * silently return zero. Recommending the fallback on ws_access alone is what
+ * turned a 403 into a wrong "the table is empty" conclusion.
+ *
+ * Best-effort: any failure of the probe itself falls back to all-'unknown' so
+ * it never masks the original error.
  */
-async function probeWebServiceAccess(
+async function probeTableAccess(
 	error: unknown,
 	tableName: string | undefined,
 	instance: string | undefined,
 	schemaService: SchemaService,
-): Promise<'disabled' | 'enabled' | 'unknown'> {
-	if (!tableName) return 'unknown';
-	if (!(error instanceof ServiceNowError) || error.statusCode !== 403) return 'unknown';
+): Promise<ProbedTableAccess> {
+	if (!tableName) return ACCESS_UNKNOWN;
+	if (!(error instanceof ServiceNowError) || error.statusCode !== 403) return ACCESS_UNKNOWN;
 	const details = error.servicenowError as { operationType?: string } | undefined;
-	if (details?.operationType === 'table-access') return 'unknown';
+	if (details?.operationType === 'table-access') return ACCESS_UNKNOWN;
 
 	try {
-		const result = await schemaService.checkWebServiceAccess(tableName, instance);
-		if (!result?.exists) return 'unknown';
-		return result.wsAccess ? 'enabled' : 'disabled';
+		const profile = await schemaService.getTableAccessProfile(tableName, instance);
+		if (!profile?.exists) return ACCESS_UNKNOWN;
+		return {
+			wsAccess: accessState(profile.wsAccess),
+			readAccess: accessState(profile.readAccess),
+			...(profile.owningScope ? { owningScope: profile.owningScope.name } : {}),
+		};
 	} catch {
-		return 'unknown';
+		return ACCESS_UNKNOWN;
 	}
 }
