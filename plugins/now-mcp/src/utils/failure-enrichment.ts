@@ -132,7 +132,12 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 				if (ctx.readAccess === 'disabled') {
 					hints.push(
 						`${table} ALSO has sys_db_object.read_access off, so it is readable only from its own application scope${scopeNote}. A background script running in global scope will return ZERO ROWS and report success — no error, isValid() and canRead() both true. Do NOT treat an empty result from a global-scope script as evidence the table is empty.`,
-						"A read here must execute in the table's owning application scope. now-sdk query (a UI session, which ServiceNow does not treat as a web-service call) is the reliable check; if you do run a script, prove the scope with gs.getCurrentScopeName() and treat any zero-row result from global scope as inconclusive.",
+						// Measured on a live instance: sys_trigger has NO sys_scope column,
+						// so the background transport always runs in rhino.global and there
+						// is no in-script escape — GlideRecordSecure, GlideAggregate, and
+						// even get() on a known sys_id all come back empty. So this hint
+						// must not offer a script-shaped workaround; there isn't one.
+						'sn_execute_background_script CANNOT read this table: its transport always runs in global scope (sys_trigger has no scope field), and no GlideRecord variant escapes that. Read it from inside the owning scope instead — a UI session, or code deployed into that application. If you do run a script, print gs.getCurrentScopeName() and treat a zero-row result from global scope as proving nothing.',
 					);
 				} else if (ctx.readAccess === 'enabled') {
 					hints.push(
@@ -140,7 +145,7 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 					);
 				} else {
 					hints.push(
-						'read_access for this table could not be determined, so the safe transport is unknown. If it is off, a global-scope background script returns zero rows silently rather than erroring — check sys_db_object.read_access before trusting an empty script result. now-sdk query avoids the ambiguity.',
+						'read_access for this table could not be determined, so the safe transport is unknown. If it is off, a global-scope background script returns zero rows silently rather than erroring — check sys_db_object.read_access before trusting an empty script result.',
 					);
 				}
 

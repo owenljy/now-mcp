@@ -393,13 +393,18 @@ async function collectVisibilityWarnings(
 				table,
 				reason:
 					`sys_db_object.read_access is off for ${table}, so it is readable only from its owning ` +
-					`application scope${scope ? ` (${scope})` : ''}. A script running in any other scope reads ` +
-					`ZERO rows and still reports success — no exception, isValid() and canRead() both true.`,
+					`application scope${scope ? ` (${scope})` : ''}. This script runs in global scope, so it reads ` +
+					`ZERO rows and still reports success — no exception, isValid() and canRead() both true. ` +
+					`Measured on a live instance: sys_trigger has no scope field, and no GlideRecord variant ` +
+					`(GlideRecordSecure, GlideAggregate, get() by sys_id) escapes this.`,
 				emptyResultIsConclusive: false,
+				// This transport genuinely cannot reach a read_access=0 table, so when
+				// the Table API is also blocked there is no route to name. Saying so is
+				// more useful than nominating a fallback that returns a false empty.
 				recommendedTransport:
 					profile.wsAccess === true
 						? 'table-api'
-						: 'owning-scope execution (verify with gs.getCurrentScopeName()) or now-sdk query',
+						: 'none available from this MCP — read from inside the owning scope',
 			});
 		}
 		return warnings.length > 0 ? warnings : undefined;

@@ -101,6 +101,14 @@ test('403 with ws_access AND read_access off warns that a global script returns 
     text,
     /GlideRecordSecure is not gated by ws_access\) or now-sdk query will return real rows/,
   );
+  // Measured in the Phase 0 spike (docs/phase0-scope-execution-spike.md):
+  // sys_trigger has NO sys_scope column, so this transport ALWAYS runs in
+  // rhino.global, and GlideRecordSecure / GlideAggregate / get(sys_id) all come
+  // back empty. The hint must state that plainly rather than implying some
+  // script formulation would work — offering a workaround that silently returns
+  // zero rows is the original bug wearing different words.
+  assert.match(text, /CANNOT read this table/);
+  assert.match(text, /sys_trigger has no scope field/);
 });
 
 test('403 with ws_access off and read_access unknown refuses to nominate a transport', () => {

@@ -1,107 +1,122 @@
 # Phase 0 — ServiceNow scope execution spike
 
-Status: **BLOCKED — not yet run.** Credentials for `demoalectriallwfaa152992`
-are rejected by both now-mcp and now-sdk (`User name or password invalid`); the
-instance itself is reachable (`stats.do` returns 302). This document is the
-prepared spike, ready to run once a working password is configured.
+Status: **RUN AND CONCLUDED.** Executed against `demoalectriallwfaa152992`
+(instance `owen-demo`) on 2026-09-03.
 
-This spike gates PR3 and PR4 (`privilegedRead` on `sn_query_records` and
-`sn_aggregate_records`). Per the plan's exit criteria, **no privileged-read code
-may ship before owning-scope execution is demonstrated against a real
-scope-restricted table.** PRs 1, 2, 5 and 6 shipped independently and did not
-need it.
+**Result: NEGATIVE. `sys_trigger` cannot execute in a target application scope.
+PR3's "sys-trigger-scoped" backend is not implementable as designed.**
 
-## The question this must settle
+This spike gated PR3 and PR4 (`privilegedRead` on `sn_query_records` and
+`sn_aggregate_records`). PRs 1, 2, 5 and 6 shipped independently.
 
-Everything in Phase 3 rests on one unverified assumption: *that setting
-`sys_scope` on a `sys_trigger` record causes its script to execute in that
-application scope.* If that is false, the "scoped read backend" cannot exist as
-designed, and the initial implementation must be restricted to a correctly
-scoped Scripted REST endpoint instead — a materially different, larger change.
+## The question
 
-Guessing here is the specific failure this whole effort exists to prevent. A
-global-scope read of a `read_access=0` table returns zero rows and reports
-success, so a spike that *assumes* the scope took effect and sees zero rows
-cannot distinguish "no data" from "wrong scope" — it would reproduce the
-original bug inside its own verification.
+Phase 3 rested on one unverified assumption: *that setting `sys_scope` on a
+`sys_trigger` record causes its script to execute in that application scope.*
 
-## Prerequisites
+## Findings
 
-1. Working credentials for a **non-production** instance.
-2. A table with `read_access=false` whose owning scope is known. Find candidates:
+### 1. The silent zero is real, and reproduced exactly
 
-   ```
-   sn_query_records tableName=sys_db_object
-     query="read_access=false^sys_scope.scope!=global"
-     fields=["name","ws_access","read_access","sys_scope.scope"]
-   ```
+Against `sn_ai_observe_scoring_provider` (`ws_access=1`, `read_access=0`, owned
+by `sn_ai_observe`), at the same moment:
 
-   Record which of the four access combinations the instance actually offers;
-   if a combination is absent, say so rather than inferring its behaviour.
+| Route | Result |
+| --- | --- |
+| Table API | **1 row** — `traceloop` (`52696c1f0b1f4258a3db8208e39121d8`) |
+| Background script, global scope | **0 rows**, `isValid: true`, `canRead: true`, no error, `success: true` |
 
-## Step 1 — establish the control
+This is the original failure, confirmed live rather than inferred. The script
+does not merely return nothing — it returns nothing *while reporting success and
+affirming it can read the table*. There is no signal available to the caller,
+inside the result, that distinguishes this from an empty table.
 
-Read the target table through the Table API. If `ws_access=true` this should
-return rows; if `ws_access=false` it must 403. Either way, record the row count.
-**This is the ground truth every later step is compared against.** Without it, a
-zero from a background script is uninterpretable.
+### 2. `sys_trigger` has no `sys_scope` column
 
-## Step 2 — prove the scope is observable at all
+`sn_get_table_schema sys_trigger` with `includeExtended` and
+`includeSystemFields`: **52 fields, zero matching "scope"** by name or label.
 
-Before testing whether scope can be *set*, confirm it can be *read*. Run a
-default (global) background script:
+Posting `sys_scope` on a `sys_trigger` insert is silently ignored — the field is
+accepted by the Table API (no error) and simply absent on read-back. So the
+mechanism Phase 3 specified does not exist. `sysparm_transaction_scope` on the
+insert also had no effect: it scopes the *insert transaction*, not the later
+scheduled execution, which the scheduler runs in its own context.
 
-```js
-log(JSON.stringify({
-  scope: gs.getCurrentScopeName(),
-  user: gs.getUserName(),
-}));
-```
+Observed execution context, every run: `gs.getCurrentScopeName()` →
+`rhino.global`, user `system`, roles `admin,snc_required_script_writer_permission,snc_internal`.
 
-If `gs.getCurrentScopeName()` does not report a usable value from the
-`sys_trigger` context, the spike stops here: scope cannot be verified from
-inside the transport, so it can never be *proven* at runtime, and the plan's
-requirement that "scope must be proven" is unsatisfiable via `sys_trigger`.
+Note this makes the failure worse than "the flag didn't work": there is no flag.
+An implementation that set `sys_scope` and trusted it would have run every
+privileged read in global scope while reporting `executionScope` as the owning
+app — a false claim in the very field meant to make privilege visible.
 
-## Step 3 — the actual experiment
+### 3. No in-script escape exists either
 
-Run the same read three ways against the `read_access=false` table and record
-all three row counts plus the observed scope:
+All attempted from a global-scope trigger against the same table:
 
-| Run | How | Expected if sys_scope works | Expected if it does not |
-| --- | --- | --- | --- |
-| A | Table API | 403 (ws_access off) | 403 |
-| B | Background script, default/global scope | 0 rows, scope `global` | 0 rows, scope `global` |
-| C | Background script with `sys_scope` set to the owning application | **>0 rows, scope = owning app** | 0 rows, scope still `global` |
+| Attempt | Result |
+| --- | --- |
+| `GlideRecordSecure` | 0 rows |
+| `GlideRecord.get(<known sys_id>)` | not found |
+| `GlideAggregate` COUNT | no row |
+| `autoSysFields(false)` + `setWorkflow(false)` | 0 rows |
 
-Run C is the whole spike. Note that **B and C differ only in the flag under
-test**, which is why B must be run even though its result is already predicted —
-it is the negative control that makes C's result mean something.
+The direct `get()` by a sys_id known to exist is the important one: the row is
+**invisible to global scope**, not merely filtered out of a query result. No
+query-shaping trick recovers it.
 
-A caution on interpreting C: `>0 rows` is only meaningful if the table actually
-contains rows. Confirm non-emptiness independently first (e.g. via `now-sdk
-query`, which authenticates through a UI session), otherwise a zero in C is
-ambiguous between "scope did not apply" and "table is genuinely empty" — the
-original bug, again.
+### 4. `ws_access=false, read_access=false` is unreachable from both transports
 
-## Step 4 — record the decision
+On `sn_awh_gateway_capability`, `sn_vsc_hub_action_restriction`,
+`sn_employee_app` (all `ws=0`, `read=0`): Table API 403s, and the global
+background script returns 0 rows with `canRead: true`. Both routes fail, and
+only one of them fails *honestly*.
 
-Write the outcome here, including the negative case. Then:
+This is the quadrant PR3 existed to serve. It cannot be served by this transport.
 
-- **If C succeeds** — `sys_trigger` + `sys_scope` executes in the owning scope.
-  PR3 may proceed as designed. Record the exact mechanism and the observed
-  identity, since `accessContext.effectiveUser` must report it truthfully.
-- **If C fails** — PR3 must be re-scoped to a Scripted REST endpoint per the
-  plan's exit criteria, and the plan's sizing estimate needs revisiting. Do not
-  ship a `privilegedRead` that silently falls back to global scope.
+### 5. Incidental confirmation for PR1
 
-Either way the implementation must keep the rule that a global zero-row result
-is never conclusive for a `read_access=0` table. Phase 1 already enforces this
-for hints and background-script warnings; PR3 must enforce it by refusing to
-execute rather than by warning.
+`sys_db_object` returned its flags as `"1"` / `"0"`, not `"true"` / `"false"`.
+PR1's `normalizeSNBoolean` handles both; a naive `=== 'true'` comparison would
+have read `read_access="0"` as *unknown* and suppressed the warning on exactly
+the tables that need it. Worth keeping in mind for any future flag reader.
 
-## Why this is not automated as a test
+## Decision
 
-It asserts platform behaviour, not our behaviour, and it mutates the instance
-(creating a trigger). It belongs in the live verification matrix — run
-deliberately against a non-production instance — not in `pnpm test`.
+1. **PR3 and PR4 are not implementable as specified. Do not build them.** The
+   plan's own exit criterion — "no implementation may treat a global zero-row
+   result as conclusive for a table with `read_access=0`" — cannot be met by a
+   `sys_trigger` backend, because global scope is the only scope it has.
+
+2. **If privileged scoped reads are still wanted**, the only remaining route is
+   the plan's own fallback: a **Scripted REST endpoint deployed inside each
+   target scope** (Fluent-authored, per the AUTHOR/OPERATE split). That is a
+   materially larger change than the plan sized — it needs one deployed artifact
+   per application scope, not one internal service — and it should be re-scoped
+   and re-estimated before any work starts.
+
+3. **What actually mitigates the original incident is PR1, which shipped.**
+   Given the finding above, the corrected 403 hint and the background-script
+   `visibilityWarnings` are not a stopgap ahead of privileged reads — they are
+   the *primary* defence, because for `read_access=0` tables there is no
+   privileged read to fall back to. The correct behaviour is to tell the caller
+   the result is inconclusive and point at `now-sdk query` (a UI session, which
+   ServiceNow does not treat as a web-service call).
+
+4. **The `now-sdk query` recommendation is UNVERIFIED and has been removed from
+   the `read_access=0` hint.** Attempting to check it here failed for unrelated
+   reasons: now-sdk's keychain still holds the pre-rotation password, and a
+   direct UI-session login was rejected (`login.do` returns the login page with
+   an invalid-credentials marker despite correct credentials — likely MFA or SSO
+   on this demo instance). Rather than ship an unmeasured claim as "the reliable
+   check", the hint now states what WAS measured: the background transport
+   cannot read the table, and the read must happen from inside the owning scope.
+   If someone later confirms a UI session does reach these tables, the hint can
+   name it again — but as a verified route, not an inference.
+
+## Cleanup
+
+All spike artifacts removed: two probe `sys_trigger` rows deleted (HTTP 204,
+`nameSTARTSWITHmcp_spike` returns `[]`). One mailbox property,
+`mcp.spike.scope.runc`, was left in place deliberately as evidence for this
+record — delete it when this document is no longer being reviewed.
