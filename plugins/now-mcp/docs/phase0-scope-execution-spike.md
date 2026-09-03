@@ -116,7 +116,7 @@ the tables that need it. Worth keeping in mind for any future flag reader.
 
 ## Cleanup
 
-All spike artifacts removed: two probe `sys_trigger` rows deleted (HTTP 204,
-`nameSTARTSWITHmcp_spike` returns `[]`). One mailbox property,
-`mcp.spike.scope.runc`, was left in place deliberately as evidence for this
-record — delete it when this document is no longer being reviewed.
+All spike artifacts removed. Two probe `sys_trigger` rows deleted (HTTP 204;
+`nameSTARTSWITHmcp_spike` now returns `[]`), and the `mcp.spike.scope.runc`
+mailbox property deleted and verified. The instance carries no residue from
+this spike.
