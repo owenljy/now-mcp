@@ -221,6 +221,15 @@ function loadYamlConfig(configPath: string): Environment {
 }
 
 /**
+ * Re-read a YAML configuration from disk without consulting the startup cache.
+ * Runtime recovery tools use this after the file has been edited in place.
+ * The caller is responsible for applying the returned configuration atomically.
+ */
+export function reloadYamlConfig(configPath: string): Environment {
+	return loadYamlConfig(path.resolve(configPath));
+}
+
+/**
  * Resolve which configured instance now-sdk wants to be active, by matching its
  * selected auth profile's host against the given instances. Returns the instance
  * NAME to switch the default to, or null to keep the YAML's own default.

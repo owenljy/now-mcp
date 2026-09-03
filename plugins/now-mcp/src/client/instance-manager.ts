@@ -2,7 +2,7 @@
  * Instance Manager for handling multiple ServiceNow instances
  */
 
-import type { ConfigSource } from '../config/environment.js';
+import { type ConfigSource, reloadYamlConfig } from '../config/environment.js';
 import { ServiceNowError } from '../types/errors.js';
 import type { InstanceConfig, InstanceStatus } from '../types/instance.js';
 import { logger } from '../utils/logger.js';
@@ -276,13 +276,68 @@ export class InstanceManager {
 		});
 	}
 
-	/** Reset local token/backoff state. Configuration itself is unchanged. */
+	/**
+	 * Reload YAML-backed clients atomically, then reset the selected connection.
+	 *
+	 * Environment/plugin-form credentials belong to the parent host process and
+	 * cannot change inside an already-running MCP child, so that source retains
+	 * the old reset-only behaviour and reports that no config reload occurred.
+	 */
 	resetConnection(instanceName?: string) {
+		let configReloaded = false;
+		let reloadedInstances = 0;
+
+		if (this.configSource?.kind === 'yaml') {
+			// Parse, validate, and construct every replacement before mutating the
+			// live maps. A broken or half-written YAML therefore leaves the working
+			// clients untouched.
+			const environment = reloadYamlConfig(this.configSource.path);
+			const nextClients = new Map<string, ServiceNowClient>();
+			const nextConfigs = new Map<string, InstanceConfig>();
+			for (const config of environment.instances) {
+				nextClients.set(
+					config.name,
+					new ServiceNowClient(config.url, config.auth, (config.timeout ?? 30) * 1000),
+				);
+				nextConfigs.set(config.name, config);
+			}
+
+			if (instanceName && !nextClients.has(instanceName)) {
+				throw new ServiceNowError(
+					`Instance '${instanceName}' is not present in the reloaded configuration. Available instances: ${Array.from(nextClients.keys()).join(', ')}`,
+					400,
+				);
+			}
+
+			const yamlDefault = environment.instances.find((config) => config.default)?.name;
+			const nextDefault = nextClients.has(this.defaultInstance)
+				? this.defaultInstance
+				: yamlDefault;
+			if (!nextDefault) {
+				throw new ServiceNowError('Reloaded configuration has no usable default instance', 400);
+			}
+
+			this.clients = nextClients;
+			this.configs = nextConfigs;
+			this.defaultInstance = nextDefault;
+			this.defaultAlignmentPending = false;
+			configReloaded = true;
+			reloadedInstances = nextClients.size;
+			logger.info('Reloaded ServiceNow clients from YAML', {
+				path: this.configSource.path,
+				instanceCount: reloadedInstances,
+				defaultInstance: this.defaultInstance,
+			});
+		}
+
 		const resolved = this.resolveInstance(instanceName);
 		return {
 			name: resolved.name,
 			url: resolved.config.url,
 			authType: resolved.client.getAuthType(),
+			configReloaded,
+			configSource: this.configSource?.kind ?? 'unknown',
+			reloadedInstances,
 			...resolved.client.resetConnection(),
 		};
 	}

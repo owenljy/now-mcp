@@ -71,6 +71,10 @@ export const ConnectionStatusOutputSchema = z.object({
 
 export const ResetConnectionOutputSchema = z.object({
 	success: z.literal(true),
-	connection: BreakerStatusSchema,
+	connection: BreakerStatusSchema.extend({
+		configReloaded: z.boolean(),
+		configSource: z.enum(['yaml', 'env', 'unknown']),
+		reloadedInstances: z.number().int().nonnegative(),
+	}),
 	note: z.string(),
 });

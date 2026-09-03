@@ -129,6 +129,14 @@ Without a valid config the server still starts (degraded mode) and reports the
 reason (including the working directory and which sources it checked) on each
 call, so you can fix it without a crash loop.
 
+After editing a YAML file, call `sn_reset_connection`. It re-reads and validates
+the YAML, rebuilds all instance clients, and only swaps them into the running
+server after the complete replacement configuration succeeds. Basic passwords,
+OAuth credentials, URLs, timeouts, and read-only settings therefore take effect
+without restarting the MCP. Plugin-form / `SERVICENOW_*` environment values are
+fixed when the MCP child process starts and still require a plugin reload or
+restart.
+
 ### Basic-auth prerequisites and 401 troubleshooting
 
 A 401 almost always traces to the ServiceNow **user record**, not the URL,

@@ -21,9 +21,9 @@ Produces: Per-instance auth type, breaker state, failure counters, retry delay, 
 export const RESET_CONNECTION_TOOL = {
 	name: 'sn_reset_connection',
 	title: 'Reset ServiceNow connection state',
-	description: `What: Clear the selected instance's local circuit-breaker state and cached OAuth token.
-When to use: Only after fixing credentials, roles, ACLs, OAuth configuration, or connectivity. For Basic auth, editing env/YAML requires restarting the MCP first because credentials are loaded at startup.
-Produces: The reset local state. This does not change ServiceNow data, unlock an account, or reload Basic credentials.`,
+	description: `What: Reload YAML-backed instance configuration and clients, then clear the selected instance's local circuit-breaker state and cached OAuth token.
+When to use: After editing YAML credentials, roles, OAuth configuration, or connectivity. Plugin-form/environment credentials still require restarting the MCP because a running child process cannot receive later parent-environment changes.
+Produces: The reset local state and whether configuration was reloaded. Reload is atomic: invalid YAML leaves the current clients unchanged. This does not change ServiceNow data or unlock an account.`,
 	inputSchema: ResetConnectionSchema,
 	outputSchema: ResetConnectionOutputSchema,
 };
@@ -56,10 +56,11 @@ export function createResetConnectionTool(instanceManager: InstanceManager) {
 			try {
 				const { instance } = ResetConnectionSchema.parse(params);
 				const connection = instanceManager.resetConnection(instance);
-				const note =
-					connection.authType === 'basic'
-						? 'Local backoff was reset. Basic credentials were not reloaded; restart now-mcp after changing env/YAML.'
-						: 'Local backoff and cached OAuth token were cleared; the next API call will acquire a token.';
+				const note = connection.configReloaded
+					? `Reloaded ${connection.reloadedInstances} instance(s) from YAML and reset local connection state; subsequent requests use the new credentials.`
+					: connection.authType === 'basic'
+						? 'Local backoff was reset. Plugin-form/environment credentials cannot be refreshed in a running MCP process; restart now-mcp after changing them.'
+						: 'Local backoff and cached OAuth token were cleared; the next API call will acquire a token. Restart now-mcp if plugin-form/environment credential values changed.';
 				return toolResult(
 					{ success: true, connection, note },
 					`reset connection: ${connection.name}`,
