@@ -398,13 +398,11 @@ async function collectVisibilityWarnings(
 					`Measured on a live instance: sys_trigger has no scope field, and no GlideRecord variant ` +
 					`(GlideRecordSecure, GlideAggregate, get() by sys_id) escapes this.`,
 				emptyResultIsConclusive: false,
-				// This transport genuinely cannot reach a read_access=0 table, so when
-				// the Table API is also blocked there is no route to name. Saying so is
-				// more useful than nominating a fallback that returns a false empty.
-				recommendedTransport:
-					profile.wsAccess === true
-						? 'table-api'
-						: 'none available from this MCP — read from inside the owning scope',
+				// When REST is open the Table API is the cheapest correct route. When it
+				// is not, now-sdk query is the one verified to work: measured against
+				// ws_access=0/read_access=0 tables that 403 the Table API and read empty
+				// here, it returned real rows.
+				recommendedTransport: profile.wsAccess === true ? 'table-api' : 'now-sdk query',
 			});
 		}
 		return warnings.length > 0 ? warnings : undefined;

@@ -6,6 +6,9 @@ Status: **RUN AND CONCLUDED.** Executed against `demoalectriallwfaa152992`
 **Result: NEGATIVE. `sys_trigger` cannot execute in a target application scope.
 PR3's "sys-trigger-scoped" backend is not implementable as designed.**
 
+**But the data is not unreachable: `now-sdk query` reads every access quadrant,
+verified (finding 4). The hints now name it as the route.**
+
 This spike gated PR3 and PR4 (`privilegedRead` on `sn_query_records` and
 `sn_aggregate_records`). PRs 1, 2, 5 and 6 shipped independently.
 
@@ -65,14 +68,15 @@ The direct `get()` by a sys_id known to exist is the important one: the row is
 **invisible to global scope**, not merely filtered out of a query result. No
 query-shaping trick recovers it.
 
-### 4. `ws_access=false, read_access=false` is unreachable from both transports
+### 4. `ws_access=false, read_access=false` is unreachable from both MCP transports
 
 On `sn_awh_gateway_capability`, `sn_vsc_hub_action_restriction`,
 `sn_employee_app` (all `ws=0`, `read=0`): Table API 403s, and the global
-background script returns 0 rows with `canRead: true`. Both routes fail, and
+background script returns 0 rows with `canRead: true`. Both MCP routes fail, and
 only one of them fails *honestly*.
 
-This is the quadrant PR3 existed to serve. It cannot be served by this transport.
+This is the quadrant PR3 existed to serve. Neither MCP transport can serve it —
+but `now-sdk query` can (see the Decision section, point 4).
 
 ### 5. Incidental confirmation for PR1
 
@@ -88,31 +92,46 @@ the tables that need it. Worth keeping in mind for any future flag reader.
    result as conclusive for a table with `read_access=0`" — cannot be met by a
    `sys_trigger` backend, because global scope is the only scope it has.
 
-2. **If privileged scoped reads are still wanted**, the only remaining route is
-   the plan's own fallback: a **Scripted REST endpoint deployed inside each
-   target scope** (Fluent-authored, per the AUTHOR/OPERATE split). That is a
-   materially larger change than the plan sized — it needs one deployed artifact
-   per application scope, not one internal service — and it should be re-scoped
-   and re-estimated before any work starts.
+2. **If privileged scoped reads are still wanted in-MCP**, the only remaining
+   route is the plan's own fallback: a **Scripted REST endpoint deployed inside
+   each target scope** (Fluent-authored, per the AUTHOR/OPERATE split). That is
+   materially larger than the plan sized — one deployed artifact per application
+   scope, not one internal service — and it should be re-scoped before any work.
 
-3. **What actually mitigates the original incident is PR1, which shipped.**
-   Given the finding above, the corrected 403 hint and the background-script
-   `visibilityWarnings` are not a stopgap ahead of privileged reads — they are
-   the *primary* defence, because for `read_access=0` tables there is no
-   privileged read to fall back to. The correct behaviour is to tell the caller
-   the result is inconclusive and point at `now-sdk query` (a UI session, which
-   ServiceNow does not treat as a web-service call).
+   But weigh it against finding 4 first: `now-sdk query` already reads every
+   quadrant today, from the CLI, with no new artifacts. The remaining gap is
+   narrower than the plan assumed — it is "Claude cannot do this read in-loop",
+   not "this read is impossible". Whether that gap justifies per-scope deployed
+   endpoints is a product call, and it should be made explicitly rather than
+   inherited from a plan written before this was known.
 
-4. **The `now-sdk query` recommendation is UNVERIFIED and has been removed from
-   the `read_access=0` hint.** Attempting to check it here failed for unrelated
-   reasons: now-sdk's keychain still holds the pre-rotation password, and a
-   direct UI-session login was rejected (`login.do` returns the login page with
-   an invalid-credentials marker despite correct credentials — likely MFA or SSO
-   on this demo instance). Rather than ship an unmeasured claim as "the reliable
-   check", the hint now states what WAS measured: the background transport
-   cannot read the table, and the read must happen from inside the owning scope.
-   If someone later confirms a UI session does reach these tables, the hint can
-   name it again — but as a verified route, not an inference.
+3. **What mitigates the original incident is PR1, which shipped.** The corrected
+   403 hint and the background-script `visibilityWarnings` are not a stopgap
+   ahead of privileged reads — they are the *primary* defence, because no
+   privileged read is coming to sit behind them. They now do both halves of the
+   job: rule out the transport that answers "empty" convincingly, and name the
+   one measured to work.
+
+4. **`now-sdk query` IS the working route — now verified, and restored to the
+   hints.** (Initially unverifiable: now-sdk's keychain held the pre-rotation
+   password. Re-tested once the `owen-demo` profile was fixed.)
+
+   | Table | flags | Table API | background script | **now-sdk query** |
+   | --- | --- | --- | --- | --- |
+   | `sn_ai_observe_scoring_provider` | ws=1 read=0 | 1 row | **0 rows** | **1 row** (`traceloop`) |
+   | `sn_vsc_hub_action_restriction` | ws=0 read=0 | 403 | **0 rows** | **rows returned** |
+   | `sn_employee_app` | ws=0 read=0 | 403 | **0 rows** | **rows returned** |
+   | `sn_awh_gateway_capability` | ws=0 read=0 | 403 | 0 rows | 0 rows — genuinely empty |
+
+   now-sdk reaches all four access quadrants, including the `ws=0, read=0`
+   quadrant that PR3 was designed to serve and that neither MCP transport can.
+
+   The last row is why the other two were worth running: taken alone, a zero
+   from `sn_awh_gateway_capability` looks exactly like a silent-zero failure.
+   Only the tables that *did* return rows prove the transport works and that
+   this particular zero is a genuinely empty table. A single-table check here
+   would have produced the wrong conclusion — the same trap as the original
+   incident, one level up.
 
 ## Cleanup
 

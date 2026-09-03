@@ -111,7 +111,12 @@ test('403 with ws_access AND read_access off warns that a global script returns 
   assert.match(text, /sys_trigger has no scope field/);
 });
 
-test('403 with ws_access off and read_access unknown refuses to nominate a transport', () => {
+test('403 with ws_access off and read_access unknown names the transport that sidesteps the doubt', () => {
+  // Originally this asserted the hint nominate NOTHING, because no route was
+  // known to work. The Phase 0 spike then verified now-sdk query reads
+  // read_access=0 tables (including ws_access=0 ones that 403 the Table API),
+  // so withholding it would now be withholding a measured answer. The hint must
+  // still flag that a background script can answer zero without erroring.
   const hints = failureHints('User Not Authorized', {
     table: 'x_mystery_table',
     operation: 'query',
@@ -121,7 +126,26 @@ test('403 with ws_access off and read_access unknown refuses to nominate a trans
   });
   const text = hints.join(' ');
   assert.match(text, /could not be determined|unknown/i);
-  assert.match(text, /zero rows silently/i);
+  assert.match(text, /zero silently/i);
+  assert.match(text, /now-sdk query/);
+});
+
+test('403 on a read_access=0 table rules out the script AND names now-sdk query', () => {
+  // Both halves are measured, and both matter: naming only the failing route
+  // leaves the caller stuck, and naming only the working one loses the warning
+  // that a script would have answered "empty" convincingly.
+  const hints = failureHints('User Not Authorized', {
+    table: 'sn_ai_observe_scoring_provider',
+    operation: 'query',
+    statusCode: 403,
+    wsAccess: 'disabled',
+    readAccess: 'disabled',
+    owningScope: 'sn_ai_observe',
+  });
+  const text = hints.join(' ');
+  assert.match(text, /CANNOT read this table/);
+  assert.match(text, /now-sdk query/);
+  assert.match(text, /verified/i);
 });
 
 test('403 with unknown access metadata says the safe transport cannot be determined', () => {

@@ -132,12 +132,17 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 				if (ctx.readAccess === 'disabled') {
 					hints.push(
 						`${table} ALSO has sys_db_object.read_access off, so it is readable only from its own application scope${scopeNote}. A background script running in global scope will return ZERO ROWS and report success — no error, isValid() and canRead() both true. Do NOT treat an empty result from a global-scope script as evidence the table is empty.`,
-						// Measured on a live instance: sys_trigger has NO sys_scope column,
-						// so the background transport always runs in rhino.global and there
-						// is no in-script escape — GlideRecordSecure, GlideAggregate, and
-						// even get() on a known sys_id all come back empty. So this hint
-						// must not offer a script-shaped workaround; there isn't one.
-						'sn_execute_background_script CANNOT read this table: its transport always runs in global scope (sys_trigger has no scope field), and no GlideRecord variant escapes that. Read it from inside the owning scope instead — a UI session, or code deployed into that application. If you do run a script, print gs.getCurrentScopeName() and treat a zero-row result from global scope as proving nothing.',
+						// Both halves measured on a live instance (see
+						// docs/phase0-scope-execution-spike.md), which is why this names one
+						// route and rules the other out rather than listing both as options:
+						//   - sys_trigger has NO sys_scope column, so the background
+						//     transport always runs in rhino.global, and no GlideRecord
+						//     variant escapes it — GlideRecordSecure, GlideAggregate, and
+						//     get() on a known sys_id all come back empty.
+						//   - now-sdk query DID return the rows the script could not see,
+						//     on every read_access=0 table tested, including ws_access=0
+						//     tables that 403 the Table API.
+						'sn_execute_background_script CANNOT read this table: its transport always runs in global scope (sys_trigger has no scope field), and no GlideRecord variant escapes that. Use now-sdk query instead — verified to return rows here that the background script reports as zero, because a UI session is not a web-service call. If you do run a script anyway, print gs.getCurrentScopeName() and treat a zero-row result from global scope as proving nothing.',
 					);
 				} else if (ctx.readAccess === 'enabled') {
 					hints.push(
@@ -145,7 +150,7 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 					);
 				} else {
 					hints.push(
-						'read_access for this table could not be determined, so the safe transport is unknown. If it is off, a global-scope background script returns zero rows silently rather than erroring — check sys_db_object.read_access before trusting an empty script result.',
+						'read_access for this table could not be determined, so a background script may or may not see its rows — and if it cannot, it returns zero silently rather than erroring. now-sdk query sidesteps the ambiguity: it reads through a UI session, which is not gated by either flag.',
 					);
 				}
 
