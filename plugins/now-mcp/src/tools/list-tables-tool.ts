@@ -27,7 +27,7 @@ filter matches the NAME: trailing * = starts-with (incident*), leading * = ends-
 
 concept matches the LABEL and the NAME, for when name matching has nothing to bite on ("the table behind this chat panel"). Keywords are OR'd; combining filter and concept ANDs them. The matched column reports which of your keywords hit each row, so a miss tells you which variant to change.
 
-Rows are RANKED by relevance (exact name/label, then prefix, core scope over an unrelated store app, base tables over staging/history/metric satellites) — take the order as given rather than re-ranking. pagination.totalMatching and hasMore tell you whether this is the whole match set or a slice; ranking applies within a page, so narrow the search rather than paging for a better match.
+Rows are RANKED by relevance across a stable candidate set (exact name/label, then prefix, core scope over an unrelated store app, base tables over staging/history/metric satellites). pagination reports whether that candidate set covered every match; nextOffset continues the same ranked order.
 
 Examples:
 - All tables (first 100): no parameters
@@ -56,7 +56,11 @@ export function createListTablesTool(schemaService: SchemaService) {
 				});
 
 				// List tables
-				const { tables, totalMatching } = await schemaService.listTables(
+				const {
+					tables,
+					totalMatching,
+					candidateComplete: reportedCandidateComplete,
+				} = await schemaService.listTables(
 					validated.filter,
 					validated.limit,
 					target.name,
@@ -69,7 +73,8 @@ export function createListTablesTool(schemaService: SchemaService) {
 				// hit — and if the byte cap then truncates, the row the caller actually
 				// wanted is the one dropped.
 				const terms = rankingTerms(validated.filter, validated.concept);
-				const ranked = rankItems(tables, terms).map((r) => r.item);
+				const allRanked = rankItems(tables, terms).map((r) => r.item);
+				const ranked = allRanked.slice(validated.offset, validated.offset + validated.limit);
 
 				const { columns, rows } = toColumnar(ranked as unknown as Record<string, unknown>[]);
 				const {
@@ -85,10 +90,11 @@ export function createListTablesTool(schemaService: SchemaService) {
 				// hasMore from the authoritative total when the instance reported one;
 				// otherwise from the page-size heuristic, which is the best available
 				// signal and still beats implying the set is complete.
-				const hasMore =
-					totalMatching !== null
-						? validated.offset + tables.length < totalMatching
-						: tables.length === validated.limit;
+				const nextOffset = validated.offset + renderedRows.length;
+				const hasMore = nextOffset < allRanked.length;
+				const candidateComplete =
+					reportedCandidateComplete ??
+					(totalMatching !== null ? allRanked.length >= totalMatching : true);
 
 				const response: Record<string, unknown> = {
 					success: true,
@@ -101,10 +107,14 @@ export function createListTablesTool(schemaService: SchemaService) {
 					// returned them. Stated explicitly so a caller doing its own ranking
 					// knows it is re-ranking an already-ranked list.
 					ranked: true,
+					rankingScope: candidateComplete ? 'complete' : 'candidate_window',
 					pagination: {
 						limit: validated.limit,
 						offset: validated.offset,
 						hasMore,
+						candidateCount: allRanked.length,
+						rankingComplete: candidateComplete,
+						...(hasMore ? { nextOffset } : {}),
 						...(totalMatching !== null ? { totalMatching } : {}),
 					},
 				};
@@ -117,14 +127,16 @@ export function createListTablesTool(schemaService: SchemaService) {
 				// A shortlist the caller cannot tell is a shortlist is the failure this
 				// guards: "100 tables" reads as the complete answer when it is the first
 				// 100 of 900, and the right table may simply not be in it.
-				if (hasMore) {
+				if (hasMore || !candidateComplete) {
 					const totalNote =
 						totalMatching !== null
 							? `${totalMatching} tables match; this page shows ${renderedRows.length}`
 							: `more tables match than this page shows`;
 					const existing = Array.isArray(response.hints) ? (response.hints as string[]) : [];
 					response.hints = [
-						`${totalNote}. Rows are ranked by relevance WITHIN this page only, so the best overall match may be outside it. Narrow with a sharper filter/concept rather than paging — a term matching hundreds of tables is usually too generic.`,
+						candidateComplete
+							? `${totalNote}. Continue at pagination.nextOffset, or narrow the search if the set is broad.`
+							: `${totalNote}. Ranking covers the first ${allRanked.length} candidates, not the entire match set; narrow with a sharper filter/concept before treating the order as globally complete.`,
 						...existing,
 					];
 				}

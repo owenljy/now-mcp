@@ -7,6 +7,7 @@ import {
   chunkKey,
   chunkWriterSource,
   reassembleChunks,
+  validateMailboxEnvelope,
 } from '../build/utils/mailbox-protocol.js';
 import { nextPollDelayMs, pollIntervalMs } from '../build/utils/poll-schedule.js';
 
@@ -103,6 +104,40 @@ test('the generated writer is ES5 — Rhino has no let/const/arrow/template lite
   assert.match(src, new RegExp(String(MAX_CHUNKS)));
 });
 
+test('mailbox envelopes are validated before their values control reads or loops', () => {
+  assert.equal(validateMailboxEnvelope({ status: 'pending' }).valid, true);
+  assert.equal(validateMailboxEnvelope({ status: 'running' }).valid, true);
+  assert.equal(validateMailboxEnvelope({ status: 'cancelled' }).valid, true);
+  assert.equal(
+    validateMailboxEnvelope({ status: 'done', success: true, chunkCount: MAX_CHUNKS }).valid,
+    true,
+  );
+  assert.match(
+    validateMailboxEnvelope({ status: 'done', success: true, chunkCount: MAX_CHUNKS + 1 }).error,
+    /chunkCount/,
+  );
+  assert.match(
+    validateMailboxEnvelope({ status: 'done', success: true, scriptDurationMs: -1 }).error,
+    /scriptDurationMs/,
+  );
+  assert.match(
+    validateMailboxEnvelope({ status: 'done', success: true, outputOriginalChars: -1 }).error,
+    /outputOriginalChars/,
+  );
+  assert.match(
+    validateMailboxEnvelope({ status: 'done', success: true, outputTruncated: 'yes' }).error,
+    /outputTruncated/,
+  );
+  assert.match(
+    validateMailboxEnvelope({ status: 'done', success: true, runtimeIdentity: 'system' }).error,
+    /runtimeIdentity/,
+  );
+  assert.match(
+    validateMailboxEnvelope({ status: 'done', output: 'missing success' }).error,
+    /boolean success/,
+  );
+});
+
 // ── adaptive polling ─────────────────────────────────────────────────────────
 
 test('polling starts fast and backs off as the wait grows', () => {
@@ -183,7 +218,7 @@ test('transport health medians the window and flags a slow scheduler', async () 
   assert.equal(health.samples, 3);
   assert.equal(health.medianSchedulerWaitMs, 31_000);
   assert.equal(health.medianPollCount, 12);
-  assert.match(health.note, /queue time, not script time/);
+  assert.match(health.note, /scheduler pickup plus polling detection/i);
   assert.match(health.note, /scriptApiPath/);
 });
 

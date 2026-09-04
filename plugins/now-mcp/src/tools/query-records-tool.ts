@@ -51,17 +51,17 @@ When to use: To retrieve the rows themselves — show me / fetch / find matching
 Preconditions: Table must exist; read access. Pass fields with the columns you need — omitting it returns every column and, with limit over 20, is blocked under queryPolicy:'safe'.
 Produces: {columns, rows} — rows[i][j] pairs against columns[j] (plus pagination metadata, recovery hints when empty).
 
-Payload cost: an unread column is still fetched and re-paid every later turn. fields:[...] is the lever; a 20-row all-column peek is always allowed if you need to see what's available first.
+Payload cost: use fields:[...] to avoid fetching unused columns. A 20-row all-column peek is allowed for exploration.
 
-Encoded query goes in the query param (operators: = != ^ ^OR > < >= <= LIKE STARTSWITH ENDSWITH IN ISEMPTY ISNOTEMPTY; dot-walk reference fields, e.g. caller_id.department.name=Network).
+Put encoded queries in query; dot-walking is supported (e.g. caller_id.department.name=Network).
 
 Field names in query/fields are checked against the table schema first, because ServiceNow SILENTLY IGNORES an unknown field in an encoded query — priorityy=1 returns the whole table with HTTP 200 and no error. A typo is reported here instead of quietly widening the result; skipFieldValidation:true runs the query as written.
 
-Journal fields (comments, work_notes) read back EMPTY unless displayValue is set — the entry stream lives only in the display value. Use displayValue:"all" to get it.
+Journal fields read empty unless displayValue:"all" is set.
 
-expand pulls fields from referenced records in one request, e.g. expand={"caller_id":["name","email"]} — one level deep, and requires fields to be listed.
+expand pulls one level of referenced fields and requires fields to be listed.
 
-A 403 is auto-diagnosed against the table's web-service access flag: the returned hint distinguishes a table-wide REST block from a missing role/ACL — trust it over re-investigating roles manually.
+A 403 is diagnosed against the table's web-service flag. For a confirmed table-wide REST block, allowNowSdkFallback:true permits a host-aligned now-sdk read and names its source/profile; ordinary or unknown ACL 403s never switch identity.
 
 Examples:
 - tableName="incident", query="priority=1^state=2", fields=["number","short_description"]
@@ -260,6 +260,7 @@ export function createQueryRecordsTool(
 							fields: requestFields,
 							displayValue: validated.displayValue,
 							excludeReferenceLink: validated.excludeReferenceLink,
+							allowNowSdkFallback: validated.allowNowSdkFallback,
 						},
 						validated.instance,
 					);
@@ -268,6 +269,12 @@ export function createQueryRecordsTool(
 					fallbackHasMore = result.hasMore;
 					source = result.source;
 					fallbackProfile = result.fallbackProfile;
+					if (result.source === 'now-sdk-query') {
+						transport = 'now-sdk-query';
+						warnings.push(
+							`This read used the independent now-sdk auth profile '${result.fallbackProfile ?? 'unknown'}', not the now-mcp API identity.`,
+						);
+					}
 				}
 				const durationMs = Date.now() - startedAt;
 

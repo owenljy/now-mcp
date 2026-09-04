@@ -67,6 +67,9 @@ const CACHE_TTL = 15 * 60 * 1000; // in-memory (L1) TTL: 15 minutes
 // Disk (L2) TTL: survives restarts so field validation works immediately.
 const DISK_CACHE_TTL =
 	parseInt(process.env.SERVICENOW_SCHEMA_CACHE_TTL || '', 10) || 24 * 60 * 60 * 1000;
+/** Stable client-side ranking window. Discovery queries broader than this are
+ * explicitly marked incomplete rather than pretending a page-local sort is global. */
+const MAX_DISCOVERY_CANDIDATES = 10_000;
 
 interface CacheEntry<T> {
 	data: T;
@@ -96,7 +99,18 @@ export class SchemaService {
 		const target = this.instanceManager.resolveInstance(instance);
 		const normalizedUrl = target.config.url.replace(/\/+$/, '').toLowerCase();
 		const urlHash = createHash('sha256').update(normalizedUrl).digest('hex').slice(0, 16);
-		return { ...target, cacheNamespace: `${target.name}:${urlHash}` };
+		const auth = target.config.auth;
+		const principal = !auth
+			? 'unknown'
+			: auth.type === 'basic'
+				? `basic:${auth.username}`
+				: `oauth:${auth.grantType ?? 'client_credentials'}:${auth.username ?? auth.clientId}`;
+		const principalHash = createHash('sha256').update(principal).digest('hex').slice(0, 12);
+		const revision = this.instanceManager.getConfigRevision?.() ?? 0;
+		return {
+			...target,
+			cacheNamespace: `${target.name}:${urlHash}:${principalHash}:r${revision}`,
+		};
 	}
 
 	/**
@@ -664,16 +678,22 @@ export class SchemaService {
 		instance?: string,
 		concept?: string[],
 		offset: number = 0,
-	): Promise<{ tables: TableListItem[]; totalMatching: number | null }> {
+	): Promise<{
+		tables: TableListItem[];
+		totalMatching: number | null;
+		candidateComplete: boolean;
+	}> {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = concept ? sanitizeKeywords(concept) : [];
 		const conceptKey = keywords.length > 0 ? keywords.join('|').toLowerCase() : 'none';
-		const cacheKey = `tables:v2:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}:${limit}:${offset}`;
+		const cacheKey = `tables:v3:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}`;
 
 		// Check cache first
-		const cached = this.getFromCache<{ tables: TableListItem[]; totalMatching: number | null }>(
-			cacheKey,
-		);
+		const cached = this.getFromCache<{
+			tables: TableListItem[];
+			totalMatching: number | null;
+			candidateComplete: boolean;
+		}>(cacheKey);
 		if (cached) {
 			logger.debug('Cache hit for table list');
 			return cached;
@@ -683,7 +703,9 @@ export class SchemaService {
 			instance: target.name,
 			instanceUrl: target.config.url,
 			filter,
-			limit,
+			requestedLimit: limit,
+			requestedOffset: offset,
+			candidateLimit: MAX_DISCOVERY_CANDIDATES,
 		});
 
 		const client = target.client;
@@ -727,8 +749,8 @@ export class SchemaService {
 		}>('/api/now/table/sys_db_object', {
 			sysparm_query: query,
 			sysparm_fields: 'name,label,super_class.name,sys_scope.scope',
-			sysparm_limit: limit,
-			sysparm_offset: offset,
+			sysparm_limit: MAX_DISCOVERY_CANDIDATES,
+			sysparm_offset: 0,
 			sysparm_order_by: 'name',
 		});
 
@@ -753,7 +775,11 @@ export class SchemaService {
 			};
 		});
 
-		const result = { tables, totalMatching };
+		const candidateComplete =
+			totalMatching === null
+				? tables.length < MAX_DISCOVERY_CANDIDATES
+				: tables.length >= totalMatching;
+		const result = { tables, totalMatching, candidateComplete };
 		this.setCache(cacheKey, result);
 
 		logger.info(`Retrieved ${tables.length} tables`);
@@ -773,18 +799,24 @@ export class SchemaService {
 		limit: number = 25,
 		instance?: string,
 		offset: number = 0,
-	): Promise<{ fields: FieldSearchItem[]; keywords: string[]; totalMatching: number | null }> {
+	): Promise<{
+		fields: FieldSearchItem[];
+		keywords: string[];
+		totalMatching: number | null;
+		candidateComplete: boolean;
+	}> {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = sanitizeKeywords(concept);
-		if (keywords.length === 0) return { fields: [], keywords, totalMatching: 0 };
+		if (keywords.length === 0) {
+			return { fields: [], keywords, totalMatching: 0, candidateComplete: true };
+		}
 
-		const cacheKey = `findfields:v2:${target.cacheNamespace}:${keywords
-			.join('|')
-			.toLowerCase()}:${limit}:${offset}`;
+		const cacheKey = `findfields:v3:${target.cacheNamespace}:${keywords.join('|').toLowerCase()}`;
 		const cached = this.getFromCache<{
 			fields: FieldSearchItem[];
 			keywords: string[];
 			totalMatching: number | null;
+			candidateComplete: boolean;
 		}>(cacheKey);
 		if (cached) {
 			logger.debug('Cache hit for field search');
@@ -795,7 +827,9 @@ export class SchemaService {
 			instance: target.name,
 			instanceUrl: target.config.url,
 			keywords,
-			limit,
+			requestedLimit: limit,
+			requestedOffset: offset,
+			candidateLimit: MAX_DISCOVERY_CANDIDATES,
 		});
 
 		// AND-ed conditions FIRST, concept OR group LAST (concept-query.ts trap 1).
@@ -825,8 +859,8 @@ export class SchemaService {
 		}>('/api/now/table/sys_dictionary', {
 			sysparm_query: query,
 			sysparm_fields: 'name,element,column_label,internal_type,reference.name',
-			sysparm_limit: limit,
-			sysparm_offset: offset,
+			sysparm_limit: MAX_DISCOVERY_CANDIDATES,
+			sysparm_offset: 0,
 			sysparm_order_by: 'name',
 		});
 
@@ -842,7 +876,11 @@ export class SchemaService {
 			matched: matchedKeywords([row.column_label, row.element], keywords).join(','),
 		}));
 
-		const result = { fields, keywords, totalMatching };
+		const candidateComplete =
+			totalMatching === null
+				? fields.length < MAX_DISCOVERY_CANDIDATES
+				: fields.length >= totalMatching;
+		const result = { fields, keywords, totalMatching, candidateComplete };
 		this.setCache(cacheKey, result);
 
 		logger.info(`Found ${fields.length} field(s) matching concept`);

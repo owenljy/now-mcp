@@ -37,15 +37,13 @@ export function createConnectionStatusTool(instanceManager: InstanceManager) {
 				const { instance } = ConnectionStatusSchema.parse(params);
 				const raw = instanceManager.getConnectionStatuses(instance);
 
-				// The transport diagnostic is a property of the transport, not of the
-				// instance, so on a multi-instance config it was the same paragraph
-				// repeated verbatim per row. Hoist it to a keyed map and drop it from
-				// the rows. Single-instance callers keep the inline field — there is
-				// nothing to deduplicate, and moving it would be churn for them.
+				// The shared map lets new callers read repeated transport prose once.
+				// Keep the legacy per-instance field throughout 2.x: removing/moving an
+				// existing response field in 2.1.0 was not actually additive.
 				const shouldHoist = raw.length > 1;
 				const transportDiagnostics: Record<string, string> = {};
 				const instances = raw.map((item) => {
-					const { diagnostic, ...transportWithoutDiagnostic } = item.backgroundScriptTransport;
+					const { diagnostic } = item.backgroundScriptTransport;
 					if (shouldHoist && diagnostic) {
 						transportDiagnostics[item.backgroundScriptTransport.transport] = diagnostic;
 					}
@@ -54,9 +52,7 @@ export function createConnectionStatusTool(instanceManager: InstanceManager) {
 					const health = transportHealth(item.name);
 					return {
 						...item,
-						backgroundScriptTransport: shouldHoist
-							? transportWithoutDiagnostic
-							: item.backgroundScriptTransport,
+						backgroundScriptTransport: item.backgroundScriptTransport,
 						...(health ? { transportHealth: health } : {}),
 					};
 				});

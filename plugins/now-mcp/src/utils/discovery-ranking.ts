@@ -63,6 +63,8 @@ export interface RankableItem {
 	scope?: string;
 	/** Which of the caller's keywords this row matched, as returned by the search. */
 	matched?: string;
+	/** Optional final deterministic tie-breaker (for fields, table + element). */
+	stableKey?: string;
 }
 
 export interface ScoredItem<T> {
@@ -128,7 +130,9 @@ export function rankItems<T extends RankableItem>(items: T[], terms: string[]): 
 			if (a.item.name.length !== b.item.name.length) {
 				return a.item.name.length - b.item.name.length;
 			}
-			return a.item.name.localeCompare(b.item.name);
+			const nameOrder = a.item.name.localeCompare(b.item.name);
+			if (nameOrder !== 0) return nameOrder;
+			return (a.item.stableKey ?? '').localeCompare(b.item.stableKey ?? '');
 		});
 }
 

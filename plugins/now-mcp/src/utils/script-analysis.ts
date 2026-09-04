@@ -325,6 +325,41 @@ export function extractReferencedTables(script: string): string[] {
 }
 
 /**
+ * Tables whose tracked GlideRecord/GlideAggregate variables are used for a read.
+ * This avoids warning on a write-only `initialize(); insert()` script merely
+ * because it constructed a record object. The result stays conservative: query,
+ * get, iteration, aggregate and value-reading members all count as reads.
+ */
+export function extractReferencedReadTables(script: string): string[] {
+	const varTable = buildVarTable(script);
+	const readTables = new Set<string>();
+	const readMembers = new Set([
+		'query',
+		'get',
+		'next',
+		'_next',
+		'hasNext',
+		'getRowCount',
+		'getValue',
+		'getDisplayValue',
+		'getElement',
+		'getFields',
+		'getElements',
+		'getRefRecord',
+		'addAggregate',
+		'getAggregate',
+	]);
+	METHOD_CALL_RE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = METHOD_CALL_RE.exec(script)) !== null) {
+		const [, varName, member] = match;
+		const table = varTable.get(varName);
+		if (table && readMembers.has(member)) readTables.add(table);
+	}
+	return [...readTables];
+}
+
+/**
  * Extract high-confidence {table, fields[]} references from a script.
  * Fields are only associated with a table when the GlideRecord variable was
  * declared with a literal table name; references on untracked variables are

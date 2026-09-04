@@ -3,20 +3,20 @@ import { test } from 'node:test';
 import { createFindFieldsTool } from '../build/tools/find-fields-tool.js';
 import { createListTablesTool } from '../build/tools/list-tables-tool.js';
 
-function tablesService({ tables, totalMatching = null }) {
+function tablesService({ tables, totalMatching = null, candidateComplete }) {
   return {
     resolveInstance: () => ({ name: 'dev', url: 'https://dev.service-now.com' }),
     async listTables() {
-      return { tables, totalMatching };
+		return { tables, totalMatching, candidateComplete };
     },
   };
 }
 
-function fieldsService({ fields, totalMatching = null }) {
+function fieldsService({ fields, totalMatching = null, candidateComplete }) {
   return {
     resolveInstance: () => ({ name: 'dev', url: 'https://dev.service-now.com' }),
     async findFields() {
-      return { fields, keywords: ['x'], totalMatching };
+		return { fields, keywords: ['x'], totalMatching, candidateComplete };
     },
   };
 }
@@ -46,17 +46,21 @@ test('sn_list_tables returns rows in relevance order, not the instance name orde
 test('sn_list_tables reports totalMatching and hasMore so a slice is not read as the whole set', async () => {
   const tool = createListTablesTool(
     tablesService({
-      tables: [{ name: 'incident', label: 'Incident' }],
-      totalMatching: 417,
+		tables: [
+			{ name: 'incident', label: 'Incident' },
+			{ name: 'incident_metric', label: 'Incident Metric' },
+		],
+		totalMatching: 2,
+		candidateComplete: true,
     }),
   );
 
   const res = await tool.handler({ filter: 'inc', limit: 1, offset: 0 });
 
-  assert.equal(res.structuredContent.pagination.totalMatching, 417);
-  assert.equal(res.structuredContent.pagination.hasMore, true);
-  assert.match(res.structuredContent.hints.join(' '), /417 tables match/);
-  assert.match(res.structuredContent.hints.join(' '), /ranked by relevance WITHIN this page/i);
+	assert.equal(res.structuredContent.pagination.totalMatching, 2);
+	assert.equal(res.structuredContent.pagination.hasMore, true);
+	assert.equal(res.structuredContent.pagination.nextOffset, 1);
+	assert.match(res.structuredContent.hints.join(' '), /2 tables match/);
 });
 
 test('a complete result set does not claim there is more', async () => {
@@ -70,15 +74,15 @@ test('a complete result set does not claim there is more', async () => {
   assert.equal(res.structuredContent.hints, undefined);
 });
 
-test('hasMore falls back to the page-size heuristic when the header is absent', async () => {
-  // Without X-Total-Count the honest answer is "possibly more", not "complete".
+test('a short candidate fetch is complete when the total-count header is absent', async () => {
   const tool = createListTablesTool(
     tablesService({ tables: [{ name: 'a' }, { name: 'b' }], totalMatching: null }),
   );
 
   const res = await tool.handler({ filter: 'x', limit: 2, offset: 0 });
 
-  assert.equal(res.structuredContent.pagination.hasMore, true);
+	assert.equal(res.structuredContent.pagination.hasMore, false);
+	assert.equal(res.structuredContent.pagination.rankingComplete, true);
   assert.equal(res.structuredContent.pagination.totalMatching, undefined);
 });
 
@@ -91,6 +95,68 @@ test('offset is echoed so a caller can compute the next page', async () => {
 
   assert.equal(res.structuredContent.pagination.offset, 100);
   assert.equal(res.structuredContent.pagination.limit, 50);
+});
+
+test('ranking happens before pagination and nextOffset continues without duplicates', async () => {
+	const service = tablesService({
+		tables: [
+			{ name: 'a_incident_archive', label: 'Incident Archive' },
+			{ name: 'incident_metric', label: 'Incident Metric' },
+			{ name: 'incident', label: 'Incident' },
+		],
+		totalMatching: 3,
+		candidateComplete: true,
+	});
+	const tool = createListTablesTool(service);
+
+	const first = await tool.handler({ filter: 'incident', limit: 2, offset: 0 });
+	const second = await tool.handler({ filter: 'incident', limit: 2, offset: 2 });
+	const names = (res) => {
+		const index = res.structuredContent.columns.indexOf('name');
+		return res.structuredContent.rows.map((row) => row[index]);
+	};
+
+	assert.deepEqual(names(first), ['incident', 'incident_metric']);
+	assert.deepEqual(names(second), ['a_incident_archive']);
+	assert.equal(first.structuredContent.pagination.nextOffset, 2);
+	assert.equal(second.structuredContent.pagination.hasMore, false);
+});
+
+test('an incomplete candidate window is labelled and does not claim global ranking', async () => {
+	const tool = createListTablesTool(
+		tablesService({
+			tables: [{ name: 'incident', label: 'Incident' }],
+			totalMatching: 20_000,
+			candidateComplete: false,
+		}),
+	);
+
+	const res = await tool.handler({ filter: 'inc', limit: 100, offset: 0 });
+
+	assert.equal(res.structuredContent.rankingScope, 'candidate_window');
+	assert.equal(res.structuredContent.pagination.rankingComplete, false);
+  assert.match(res.structuredContent.hints.join(' '), /not the entire match set/i);
+});
+
+test('nextOffset advances by rows actually rendered when the byte cap truncates a page', async () => {
+  const tool = createListTablesTool(
+    tablesService({
+      tables: [
+        { name: 'x_one', label: 'A'.repeat(30_000) },
+        { name: 'x_two', label: 'B'.repeat(30_000) },
+        { name: 'x_three', label: 'C'.repeat(30_000) },
+      ],
+      totalMatching: 3,
+      candidateComplete: true,
+    }),
+  );
+
+  const res = await tool.handler({ filter: 'x_', limit: 3, offset: 0 });
+
+  assert.equal(res.structuredContent.truncated, true);
+  assert.equal(res.structuredContent.count, 1);
+  assert.equal(res.structuredContent.pagination.nextOffset, 1);
+  assert.equal(res.structuredContent.pagination.hasMore, true);
 });
 
 test('sn_find_fields ranks on the column name and keeps the row shape unchanged', async () => {
@@ -217,8 +283,11 @@ test('a multi-instance status says the shared transport diagnostic once', async 
     body.transportDiagnostics.sys_trigger,
     'A long paragraph about the sys_trigger transport.',
   );
-  for (const inst of body.instances) {
-    assert.equal(inst.backgroundScriptTransport.diagnostic, undefined);
+	for (const inst of body.instances) {
+		assert.equal(
+			inst.backgroundScriptTransport.diagnostic,
+			'A long paragraph about the sys_trigger transport.',
+		);
     // Per-instance facts must survive the hoist.
     assert.equal(inst.backgroundScriptTransport.transport, 'sys_trigger');
     assert.equal(inst.state, 'closed');

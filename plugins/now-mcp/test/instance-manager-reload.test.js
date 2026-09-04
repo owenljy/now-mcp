@@ -46,6 +46,7 @@ test('resetConnection reloads Basic credentials from YAML and rebuilds the clien
   writeFileSync(configPath, yaml('fresh-secret'));
   const im = manager(configPath);
   const oldClient = im.getClient('dev');
+	assert.equal(im.getConfigRevision(), 0);
 
   const result = im.resetConnection('dev');
 
@@ -54,6 +55,7 @@ test('resetConnection reloads Basic credentials from YAML and rebuilds the clien
   assert.equal(result.reloadedInstances, 1);
   assert.notEqual(im.getClient('dev'), oldClient);
   assert.equal(im.getConfig('dev').auth.password, 'fresh-secret');
+	assert.equal(im.getConfigRevision(), 1);
 });
 
 test('invalid reloaded YAML leaves the existing client and config untouched', () => {
@@ -67,6 +69,7 @@ test('invalid reloaded YAML leaves the existing client and config untouched', ()
   assert.throws(() => im.resetConnection('dev'), /Failed to load configuration/);
   assert.equal(im.getClient('dev'), oldClient);
   assert.equal(im.getConfig('dev').auth.password, 'stale');
+	assert.equal(im.getConfigRevision(), 0);
 });
 
 test('environment-backed reset remains reset-only and reports no reload', () => {
@@ -88,4 +91,5 @@ test('environment-backed reset remains reset-only and reports no reload', () => 
   assert.equal(result.configReloaded, false);
   assert.equal(result.configSource, 'env');
   assert.equal(result.reloadedInstances, 0);
+	assert.equal(im.getConfigRevision(), 0);
 });

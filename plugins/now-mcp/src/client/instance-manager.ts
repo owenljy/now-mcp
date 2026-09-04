@@ -28,6 +28,8 @@ export class InstanceManager {
 	 * race this decision and land on the wrong instance.
 	 */
 	private defaultAlignmentPending = false;
+	/** Monotonic generation used by dependent caches after an in-process YAML reload. */
+	private configRevision = 0;
 	/** Where the config came from — for source-aware runtime error guidance. */
 	private readonly configSource?: ConfigSource;
 
@@ -128,6 +130,10 @@ export class InstanceManager {
 	 */
 	getConfigSource(): ConfigSource | undefined {
 		return this.configSource;
+	}
+
+	getConfigRevision(): number {
+		return this.configRevision;
 	}
 
 	/**
@@ -321,6 +327,7 @@ export class InstanceManager {
 			this.configs = nextConfigs;
 			this.defaultInstance = nextDefault;
 			this.defaultAlignmentPending = false;
+			this.configRevision++;
 			configReloaded = true;
 			reloadedInstances = nextClients.size;
 			logger.info('Reloaded ServiceNow clients from YAML', {

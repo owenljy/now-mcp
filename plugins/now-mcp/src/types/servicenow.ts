@@ -123,6 +123,8 @@ export interface QueryOptions {
 	fields?: string[]; // Specific fields to retrieve
 	displayValue?: boolean | 'all'; // Return display values
 	excludeReferenceLink?: boolean;
+	/** Explicit independent-identity fallback for a confirmed table-wide REST block. */
+	allowNowSdkFallback?: boolean;
 }
 
 /**

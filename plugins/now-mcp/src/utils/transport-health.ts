@@ -72,8 +72,8 @@ export function transportHealth(instance: string): TransportHealth | undefined {
 		...(medianSchedulerWaitMs !== undefined && medianSchedulerWaitMs > 10_000
 			? {
 					note:
-						`The scheduler takes ~${Math.round(medianSchedulerWaitMs / 1000)}s to pick up a Run Once ` +
-						`trigger on this instance. That is queue time, not script time — configure scriptApiPath ` +
+						`Scheduler pickup plus polling detection takes at most ~${Math.round(medianSchedulerWaitMs / 1000)}s for a Run Once ` +
+						`trigger on this instance. Script time is reported separately — configure scriptApiPath ` +
 						`(a Scripted REST resource) to execute synchronously and skip the scheduler.`,
 				}
 			: {}),

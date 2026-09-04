@@ -8,8 +8,10 @@ import { logger } from '../utils/logger.js';
 import {
 	chunkWriterSource,
 	MAX_CHUNKS,
+	MAX_TOTAL_CHARS,
 	type MailboxEnvelope,
 	reassembleChunks,
+	validateMailboxEnvelope,
 } from '../utils/mailbox-protocol.js';
 import { nextPollDelayMs } from '../utils/poll-schedule.js';
 import { validateWriteAccess } from '../utils/validators.js';
@@ -36,16 +38,27 @@ interface ScriptExecutionResult {
 export interface ScriptTransportTimings {
 	/** Everything, start to finish, as measured in this process. */
 	totalDurationMs: number;
+	/** Mailbox + trigger creation before polling begins. */
+	setupDurationMs: number;
+	/** Time from trigger creation until the completed envelope was observed. */
+	pollingDurationMs: number;
 	/**
-	 * Time before the script began running, DERIVED: total minus the measured
-	 * script duration and cleanup. It is named "observed" because this process
+	 * Time before the script began running, DERIVED: polling time minus the measured
+	 * script and output-persistence durations. It is named "observed" because this process
 	 * cannot see the scheduler's own clock — it bounds the queue wait from
 	 * outside rather than reading it. Absent when the script did not report its
 	 * own duration, since the subtraction would then be meaningless.
 	 */
 	observedSchedulerWaitMs?: number;
+	/** More accurately named alias for observedSchedulerWaitMs. It still includes
+	 * polling detection lag and request latency, so it is an upper bound. */
+	observedSchedulerWaitUpperBoundMs?: number;
 	/** Measured inside the trigger, around the script body only. */
 	scriptDurationMs?: number;
+	/** Time measured inside the trigger while output chunks were inserted. */
+	outputPersistenceDurationMs?: number;
+	/** Time spent fetching and reconstructing output after completion. */
+	payloadReadDurationMs: number;
 	/** Time spent deleting the mailbox parent and chunk properties. */
 	cleanupDurationMs: number;
 	/** Mailbox reads issued. The headline number for polling efficiency. */
@@ -63,6 +76,7 @@ export interface ScriptRuntimeIdentity {
 	userId?: string;
 	roles?: string;
 	isInteractive?: boolean;
+	scopeName?: string;
 }
 
 export type ScriptExecutionTransport = 'scripted_rest' | 'sys_trigger';
@@ -73,10 +87,8 @@ export interface ScriptExecutionTransportStatus {
 	usesCompanionEndpoint: boolean;
 	fallbackOnFailure: false;
 	privilegeModel: 'configured_endpoint_context' | 'scheduled_job_context';
-	/** Always set by getExecutionTransportStatus. Optional in the type because
-	 * sn_connection_status hoists it into a shared, per-transport map when
-	 * reporting several instances, rather than repeating identical prose. */
-	diagnostic?: string;
+	/** Retained per instance for 2.x compatibility; status also exposes a shared map. */
+	diagnostic: string;
 }
 
 function errorMessage(error: unknown): string {
@@ -131,6 +143,25 @@ function parseScriptApiResponse(value: unknown, endpoint: string): ScriptExecuti
 			'BACKGROUND_SCRIPT_INVALID_RESPONSE',
 		);
 	}
+	if (typed.outputTruncated !== undefined && typeof typed.outputTruncated !== 'boolean') {
+		throw new ServiceNowError(
+			`Background-script Scripted REST API returned a non-boolean outputTruncated from POST ${endpoint}`,
+			undefined,
+			undefined,
+			'BACKGROUND_SCRIPT_INVALID_RESPONSE',
+		);
+	}
+	for (const field of ['outputOriginalChars', 'outputReturnedChars'] as const) {
+		const count = typed[field];
+		if (count !== undefined && (!Number.isSafeInteger(count) || count < 0)) {
+			throw new ServiceNowError(
+				`Background-script Scripted REST API returned an invalid ${field} from POST ${endpoint}`,
+				undefined,
+				undefined,
+				'BACKGROUND_SCRIPT_INVALID_RESPONSE',
+			);
+		}
+	}
 	if (
 		typed.runtimeIdentity !== undefined &&
 		(typeof typed.runtimeIdentity !== 'object' || typed.runtimeIdentity === null)
@@ -141,6 +172,27 @@ function parseScriptApiResponse(value: unknown, endpoint: string): ScriptExecuti
 			undefined,
 			'BACKGROUND_SCRIPT_INVALID_RESPONSE',
 		);
+	}
+	if (typed.runtimeIdentity) {
+		const identity = typed.runtimeIdentity as unknown as Record<string, unknown>;
+		for (const field of ['userName', 'userId', 'roles', 'scopeName']) {
+			if (identity[field] !== undefined && typeof identity[field] !== 'string') {
+				throw new ServiceNowError(
+					`Background-script Scripted REST API returned a non-string runtimeIdentity.${field} from POST ${endpoint}`,
+					undefined,
+					undefined,
+					'BACKGROUND_SCRIPT_INVALID_RESPONSE',
+				);
+			}
+		}
+		if (identity.isInteractive !== undefined && typeof identity.isInteractive !== 'boolean') {
+			throw new ServiceNowError(
+				`Background-script Scripted REST API returned a non-boolean runtimeIdentity.isInteractive from POST ${endpoint}`,
+				undefined,
+				undefined,
+				'BACKGROUND_SCRIPT_INVALID_RESPONSE',
+			);
+		}
 	}
 	return typed;
 }
@@ -273,6 +325,44 @@ export class ScriptService {
 		}
 	}
 
+	/** Best-effort cancellation for a Run Once trigger that has not started yet. */
+	private async cleanupTrigger(
+		client: { delete: (endpoint: string) => Promise<unknown> },
+		triggerSysId: string,
+		triggerName: string,
+	): Promise<void> {
+		try {
+			await client.delete(`/api/now/table/sys_trigger/${triggerSysId}`);
+		} catch (error) {
+			// The scheduler normally deletes Run Once triggers itself. A 404 here can
+			// therefore mean it already claimed the job, which is exactly why timeout
+			// remains semantically uncertain rather than being reported as cancelled.
+			logger.warn('Could not cancel background-script Run Once trigger', {
+				triggerName,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	/** Publish a cancellation marker before deleting records, so a trigger that
+	 * starts concurrently can observe that its lease was revoked. */
+	private async cancelMailbox(
+		client: { patch: (endpoint: string, body: unknown) => Promise<unknown> },
+		parentSysId: string,
+		propKey: string,
+	): Promise<void> {
+		try {
+			await client.patch(`/api/now/table/sys_properties/${parentSysId}`, {
+				value: JSON.stringify({ status: 'cancelled' }),
+			});
+		} catch (error) {
+			logger.warn('Could not mark background-script mailbox as cancelled', {
+				propKey,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	/**
 	 * Execute arbitrary server-side JavaScript using the configured Scripted REST
 	 * resource, or sys_trigger when scriptApiPath is omitted.
@@ -296,6 +386,10 @@ export class ScriptService {
 		executionTime: number;
 		executionPath: 'scripted-rest' | 'sys_trigger';
 		outcome: 'completed' | 'script_failed' | 'timed_out';
+		/** On timeout the scheduler may already have started the script; cancellation
+		 * is best-effort, so callers must not assume a mutation did not occur. */
+		executionState?: 'completed' | 'failed' | 'unknown_after_timeout';
+		instanceName?: string;
 		runtimeIdentity?: ScriptRuntimeIdentity;
 		outputTruncated?: boolean;
 		outputOriginalChars?: number;
@@ -306,6 +400,7 @@ export class ScriptService {
 		validateWriteAccess(this.instanceManager, instance);
 		const client = this.instanceManager.getClient(instance);
 		const config = this.instanceManager.getConfig(instance);
+		const instanceName = config.name;
 		const startTime = Date.now();
 
 		logger.info('Executing background script', {
@@ -335,6 +430,11 @@ export class ScriptService {
 					executionTime,
 					executionPath: 'scripted-rest',
 					outcome: r.success ? 'completed' : 'script_failed',
+					executionState: r.success ? 'completed' : 'failed',
+					instanceName,
+					outputTruncated: r.outputTruncated,
+					outputOriginalChars: r.outputOriginalChars,
+					outputReturnedChars: r.outputReturnedChars,
 				};
 			} catch (error) {
 				const executionTime = Date.now() - startTime;
@@ -429,47 +529,93 @@ export class ScriptService {
 				.replace(/\bgs\.print\s*\(/g, 'log(');
 
 			const wrappedScript = `
-        (function() {
-          var __key = '${propKey}';
-          var __output = [];
-		  var __runtimeIdentity = {};
-		  try { __runtimeIdentity.userName = String(gs.getUserName()).substring(0, 160); } catch (ignore) {}
-		  try { __runtimeIdentity.userId = String(gs.getUserID()).substring(0, 64); } catch (ignore) {}
-		  try { __runtimeIdentity.roles = String(gs.getUser().getRoles()).substring(0, 800); } catch (ignore) {}
-		  try { __runtimeIdentity.isInteractive = !!gs.getSession().isInteractive(); } catch (ignore) {}
-          // log() is the output capture helper. gs.log/gs.info in the user script
-          // have been rewritten to call this automatically.
-		  var log = function(msg) { var s = String(msg); __output.push(s); ${mirrorOutputToSystemLog ? `gs.log('[now-mcp ${triggerName}] ' + s);` : ''} };
-          ${chunkWriterSource('__key')}
+	        (function() {
+	          var __key = '${propKey}';
+	          var __output = [];
+	          var __outputChars = 0;
+	          var __outputOriginalChars = 0;
+			  var __runtimeIdentity = {};
+			  try { __runtimeIdentity.userName = String(gs.getUserName()).substring(0, 160); } catch (ignore) {}
+			  try { __runtimeIdentity.userId = String(gs.getUserID()).substring(0, 64); } catch (ignore) {}
+			  try { __runtimeIdentity.roles = String(gs.getUser().getRoles()).substring(0, 800); } catch (ignore) {}
+			  try { __runtimeIdentity.isInteractive = !!gs.getSession().isInteractive(); } catch (ignore) {}
+			  try { __runtimeIdentity.scopeName = String(gs.getCurrentScopeName()).substring(0, 160); } catch (ignore) {}
+			  // A timed-out caller deletes the parent. Do not start late work once its
+			  // cancellation marker is gone, and mark a claimed execution as running.
+			  var __lease = new GlideRecord('sys_properties');
+			  if (!__lease.get('name', __key)) { return; }
+			  try {
+			    var __leaseValue = JSON.parse(String(__lease.getValue('value') || '{}'));
+			    if (__leaseValue.status !== 'pending') { return; }
+			  } catch (__leaseError) { return; }
+			  __lease.setValue('value', JSON.stringify({status: 'running'}));
+			  if (!__lease.update()) { return; }
+	          // log() is the output capture helper. gs.log/gs.info in the user script
+	          // have been rewritten to call this automatically.
+			  // Capture is bounded WHILE the script runs. Capping only after join() still
+			  // lets a noisy script allocate an unbounded array/string on the instance.
+			  var log = function(msg) {
+			    var s = String(msg);
+			    var withSeparator = (__outputOriginalChars > 0 ? '\\n' : '') + s;
+			    __outputOriginalChars += withSeparator.length;
+			    if (__outputChars < ${MAX_TOTAL_CHARS}) {
+			      var remaining = ${MAX_TOTAL_CHARS} - __outputChars;
+			      var kept = withSeparator.substring(0, remaining);
+			      __output.push(kept);
+			      __outputChars += kept.length;
+			    }
+			    ${mirrorOutputToSystemLog ? `gs.log('[now-mcp ${triggerName}] ' + s);` : ''}
+			  };
+	          ${chunkWriterSource('__key')}
+			  var __isActive = function() {
+			    var __active = new GlideRecord('sys_properties');
+			    if (!__active.get('name', __key)) { return false; }
+			    try { return JSON.parse(String(__active.getValue('value') || '{}')).status === 'running'; }
+			    catch (__activeError) { return false; }
+			  };
           // Publish the envelope in ONE update so a poller can never observe
           // status=done before the chunks it promises exist.
-          var __finish = function(envelope) {
-            var __gr = new GlideRecord('sys_properties');
-            if (__gr.get('name', __key)) {
-              __gr.setValue('value', JSON.stringify(envelope));
+		  var __finish = function(envelope) {
+		    var __gr = new GlideRecord('sys_properties');
+		    if (__gr.get('name', __key)) {
+		      try {
+		        if (JSON.parse(String(__gr.getValue('value') || '{}')).status !== 'running') { return; }
+		      } catch (__finishStateError) { return; }
+		      __gr.setValue('value', JSON.stringify(envelope));
               __gr.update();
             }
           };
           var __started = new Date().getTime();
-          try {
-            ${rewrittenScript}
-            var __elapsed = new Date().getTime() - __started;
-            var __w = __writeChunks(__output.join('\\n'));
-            __finish({
+	          try {
+	            ${rewrittenScript}
+	            var __elapsed = new Date().getTime() - __started;
+			    // Timeout/cancellation may have happened while the script was running.
+			    // Its side effects are inherently uncertain, but do not create orphan chunks.
+			    if (!__isActive()) { return; }
+			    var __persistStarted = new Date().getTime();
+			    var __w = __writeChunks(__output.join(''), __outputOriginalChars, __isActive);
+			    if (__w.cancelled || !__isActive()) { __deleteWrittenChunks(__w.count); return; }
+			    var __persistElapsed = new Date().getTime() - __persistStarted;
+	            __finish({
               status: 'done', success: true, runtimeIdentity: __runtimeIdentity,
               chunkCount: __w.count,
               outputTruncated: __w.truncated,
               outputOriginalChars: __w.originalChars,
               outputReturnedChars: __w.returnedChars,
               chunkWriteFailed: __w.failed,
-              scriptDurationMs: __elapsed
-            });
-          } catch (e) {
-            var __elapsedErr = new Date().getTime() - __started;
+	              scriptDurationMs: __elapsed,
+			      outputPersistenceDurationMs: __persistElapsed
+	            });
+	          } catch (e) {
+	            var __elapsedErr = new Date().getTime() - __started;
+			    if (!__isActive()) { return; }
             // The error body is chunked too: a stack trace from a deep call chain
             // routinely exceeded the old 2700-char inline cap, so the diagnostic
             // most needed on a failure was the one most likely to be cut.
-            var __we = __writeChunks(String(e));
+			    var __persistErrStarted = new Date().getTime();
+			    var __we = __writeChunks(String(e), String(e).length, __isActive);
+			    if (__we.cancelled || !__isActive()) { __deleteWrittenChunks(__we.count); return; }
+			    var __persistErrElapsed = new Date().getTime() - __persistErrStarted;
             __finish({
               status: 'done', success: false, runtimeIdentity: __runtimeIdentity,
               chunkCount: __we.count,
@@ -478,22 +624,25 @@ export class ScriptService {
               outputReturnedChars: __we.returnedChars,
               chunkWriteFailed: __we.failed,
               isErrorPayload: true,
-              scriptDurationMs: __elapsedErr
-            });
+	              scriptDurationMs: __elapsedErr,
+			      outputPersistenceDurationMs: __persistErrElapsed
+	            });
           }
         })();
       `;
 
 			const nowSN = new Date().toISOString().slice(0, 19).replace('T', ' ');
 			const triggerEndpoint = '/api/now/table/sys_trigger';
+			let triggerSysId: string | undefined;
 			try {
-				await client.post(triggerEndpoint, {
+				const triggerCreate = await client.post<{ result?: { sys_id?: string } }>(triggerEndpoint, {
 					name: triggerName,
 					trigger_type: '0', // Run Once — scheduler picks up and deletes after execution
 					next_action: nowSN,
 					script: wrappedScript,
 					active: true,
 				});
+				triggerSysId = triggerCreate?.result?.sys_id;
 			} catch (error) {
 				// The trigger was never created, so remove the mailbox immediately.
 				try {
@@ -513,6 +662,8 @@ export class ScriptService {
 				);
 			}
 			logger.debug(`Created sys_trigger (Run Once): ${triggerName}`);
+			const pollingStartedAt = Date.now();
+			const setupDurationMs = pollingStartedAt - startTime;
 
 			// Step 3: Poll sys_properties until status=done or timeout, backing off as
 			// the wait grows. Measured scheduler latency has a ~31s median, so a flat
@@ -522,7 +673,11 @@ export class ScriptService {
 			let pollCount = 0;
 
 			while (Date.now() < deadline) {
-				await this.sleep(nextPollDelayMs(Date.now() - startTime, this.random));
+				const remainingMs = deadline - Date.now();
+				await this.sleep(
+					Math.min(remainingMs, nextPollDelayMs(Date.now() - pollingStartedAt, this.random)),
+				);
+				if (Date.now() >= deadline) break;
 
 				const pollEndpoint = `${mailboxEndpoint}/${propSysId}`;
 				let propPoll: { result: { value: string } };
@@ -534,19 +689,44 @@ export class ScriptService {
 				} catch (error) {
 					// Clean up everything, not just the parent: chunks may already have
 					// been written by a trigger that ran while polling was failing.
+					await this.cancelMailbox(client, propSysId, propKey);
+					if (triggerSysId) await this.cleanupTrigger(client, triggerSysId, triggerName);
 					await this.cleanupMailbox(client, propSysId, propKey, MAX_CHUNKS);
 					throw phaseError('mailbox polling', 'GET', pollEndpoint, error);
 				}
 
 				try {
-					const data = JSON.parse(propPoll.result.value) as MailboxEnvelope;
-					if (data.status === 'done') {
-						envelope = data;
+					const parsed = JSON.parse(propPoll.result.value) as unknown;
+					const checked = validateMailboxEnvelope(parsed);
+					if (!checked.valid) {
+						throw new ServiceNowError(
+							`Background-script mailbox returned an invalid envelope: ${checked.error}`,
+							undefined,
+							parsed,
+							'BACKGROUND_SCRIPT_INVALID_RESPONSE',
+						);
+					}
+					if (checked.envelope?.status === 'done') {
+						envelope = checked.envelope;
 						break;
 					}
-				} catch {
+				} catch (error) {
+					if (error instanceof ServiceNowError) {
+						await this.cancelMailbox(client, propSysId, propKey);
+						if (triggerSysId) await this.cleanupTrigger(client, triggerSysId, triggerName);
+						await this.cleanupMailbox(client, propSysId, propKey, MAX_CHUNKS);
+						throw error;
+					}
 					// Not valid JSON yet — keep polling
 				}
+			}
+			const envelopeObservedAt = Date.now();
+			// Stop a not-yet-started trigger before removing the lease/mailbox it
+			// checks. If the scheduler already claimed it, side effects remain unknown,
+			// but the wrapper's second lease check prevents late orphan chunks.
+			if (!envelope) {
+				await this.cancelMailbox(client, propSysId, propKey);
+				if (triggerSysId) await this.cleanupTrigger(client, triggerSysId, triggerName);
 			}
 
 			// Step 4: Collect the payload, then clean up parent + chunks. Reading
@@ -555,6 +735,7 @@ export class ScriptService {
 			// from a late-running trigger cannot be left behind.
 			let payload = '';
 			let reassemblyError: string | undefined;
+			const payloadReadStart = Date.now();
 			if (envelope && (envelope.chunkCount ?? 0) > 0) {
 				const chunks = await this.readChunks(client, propKey, envelope.chunkCount ?? 0);
 				const reassembled = reassembleChunks(propKey, envelope.chunkCount ?? 0, chunks);
@@ -565,6 +746,7 @@ export class ScriptService {
 				// still in flight across an upgrade. Its payload sits inline.
 				payload = (envelope.success ? envelope.output : envelope.error) ?? '';
 			}
+			const payloadReadDurationMs = Date.now() - payloadReadStart;
 
 			// Only enumerate chunks when some can exist. Three cases:
 			//  - no envelope (timeout): the trigger may still run and write chunks
@@ -580,20 +762,25 @@ export class ScriptService {
 
 			const executionTime = Date.now() - startTime;
 			const scriptDurationMs = envelope?.scriptDurationMs;
+			const outputPersistenceDurationMs = envelope?.outputPersistenceDurationMs;
+			const pollingDurationMs = envelopeObservedAt - pollingStartedAt;
+			const schedulerWaitUpperBoundMs =
+				typeof scriptDurationMs === 'number'
+					? Math.max(0, pollingDurationMs - scriptDurationMs - (outputPersistenceDurationMs ?? 0))
+					: undefined;
 			const timings: ScriptTransportTimings = {
 				totalDurationMs: executionTime,
-				...(typeof scriptDurationMs === 'number'
+				setupDurationMs,
+				pollingDurationMs,
+				...(schedulerWaitUpperBoundMs !== undefined
 					? {
 							scriptDurationMs,
-							// Derived, not observed directly — this process cannot read the
-							// scheduler's clock. Floored at 0 so clock skew between the
-							// instance and this host can never produce a negative wait.
-							observedSchedulerWaitMs: Math.max(
-								0,
-								executionTime - scriptDurationMs - cleanupDurationMs,
-							),
+							observedSchedulerWaitMs: schedulerWaitUpperBoundMs,
+							observedSchedulerWaitUpperBoundMs: schedulerWaitUpperBoundMs,
 						}
 					: {}),
+				...(typeof outputPersistenceDurationMs === 'number' ? { outputPersistenceDurationMs } : {}),
+				payloadReadDurationMs,
 				cleanupDurationMs,
 				pollCount,
 			};
@@ -602,10 +789,12 @@ export class ScriptService {
 				logger.error('Background script execution timed out', { timeout, executionTime });
 				return {
 					success: false,
-					error: `Script execution timed out after ${executionTime}ms. The sys_trigger (Run Once) was created but the ServiceNow scheduler did not execute it within the timeout. Check that the scheduler is running: System Diagnostics > Scheduler.`,
+					error: `Script execution timed out after ${executionTime}ms. Cancellation was requested, but the scheduler may already have started the script; if it contained writes, verify their effects before retrying. Check scheduler health under System Diagnostics > Scheduler.`,
 					executionTime,
 					executionPath: 'sys_trigger',
 					outcome: 'timed_out',
+					executionState: 'unknown_after_timeout',
+					instanceName,
 					timings,
 				};
 			}
@@ -633,6 +822,8 @@ export class ScriptService {
 					executionPath: 'sys_trigger',
 					outcome: 'script_failed',
 					runtimeIdentity: envelope.runtimeIdentity as ScriptRuntimeIdentity | undefined,
+					executionState: 'failed',
+					instanceName,
 					timings,
 				};
 			}
@@ -652,6 +843,8 @@ export class ScriptService {
 				executionPath: 'sys_trigger',
 				outcome: success ? 'completed' : 'script_failed',
 				runtimeIdentity: envelope.runtimeIdentity as ScriptRuntimeIdentity | undefined,
+				executionState: success ? 'completed' : 'failed',
+				instanceName,
 				timings,
 			};
 		} catch (error) {

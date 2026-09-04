@@ -56,14 +56,9 @@ const BackgroundScriptTransportStatusSchema = z.object({
 	usesCompanionEndpoint: z.boolean(),
 	fallbackOnFailure: z.literal(false),
 	privilegeModel: z.enum(['configured_endpoint_context', 'scheduled_job_context']),
-	/**
-	 * Prose explanation of the transport. Hoisted to the response-level
-	 * `transportDiagnostics` map when several instances share a transport, since
-	 * it is a property of the TRANSPORT, not of the instance — repeating the same
-	 * paragraph per instance was pure duplication. Always present when only one
-	 * instance is reported, so a single-instance caller sees no change.
-	 */
-	diagnostic: z.string().optional(),
+	/** Retained on every instance for the 2.x contract. Multi-instance responses
+	 * also expose transportDiagnostics for clients introduced in 2.1.0. */
+	diagnostic: z.string(),
 });
 
 /**

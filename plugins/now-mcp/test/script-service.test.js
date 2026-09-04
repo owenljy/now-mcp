@@ -81,6 +81,21 @@ test('Scripted REST response contract is validated', async () => {
   });
 });
 
+test('Scripted REST output metadata is validated before it reaches the tool response', async () => {
+  const client = {
+    post: async () => ({
+      result: { success: true, output: 'ok', outputTruncated: 'yes', outputOriginalChars: -1 },
+    }),
+  };
+  const service = new ScriptService(manager(client, { scriptApiPath: '/api/x_acme/scripts/run' }));
+
+  await assert.rejects(service.executeBackgroundScript('1 + 1'), (error) => {
+    assert.equal(error.code, 'BACKGROUND_SCRIPT_INVALID_RESPONSE');
+    assert.match(error.message, /outputTruncated/);
+    return true;
+  });
+});
+
 test('mailbox creation failure identifies sys_properties and its access prerequisite', async () => {
   const client = { post: async () => { throw apiError(); } };
   const service = new ScriptService(manager(client));
@@ -113,7 +128,7 @@ test('trigger creation failure identifies sys_trigger and cleans up the mailbox'
   assert.deepEqual(deleted, ['/api/now/table/sys_properties/prop-id']);
 });
 
-test('polling failure identifies the mailbox URL and cleans it up', async () => {
+test('polling failure identifies the mailbox URL and cancels the trigger before mailbox cleanup', async () => {
   const deleted = [];
   const client = {
     async post(endpoint) {
@@ -121,6 +136,7 @@ test('polling failure identifies the mailbox URL and cleans it up', async () => 
       return { result: { sys_id: 'trigger-id' } };
     },
     async get() { throw apiError(); },
+    async patch() {},
     async delete(endpoint) { deleted.push(endpoint); },
   };
   const service = new ScriptService(manager(client));
@@ -130,7 +146,10 @@ test('polling failure identifies the mailbox URL and cleans it up', async () => 
     assert.match(error.message, /GET \/api\/now\/table\/sys_properties\/prop-id/);
     return true;
   });
-  assert.deepEqual(deleted, ['/api/now/table/sys_properties/prop-id']);
+  assert.deepEqual(deleted, [
+    '/api/now/table/sys_trigger/trigger-id',
+    '/api/now/table/sys_properties/prop-id',
+  ]);
 });
 
 test('successful Scripted REST execution returns the validated result', async () => {
@@ -202,6 +221,13 @@ test('sys_trigger wrapper captures bounded scheduler runtime identity', async ()
   // (The literal 2700 survives only in a comment explaining the old behaviour.)
   assert.doesNotMatch(triggerPayload.script, /substring\(0, 2700\)/);
   assert.match(triggerPayload.script, /__writeChunks/);
+  assert.match(triggerPayload.script, /__leaseValue\.status !== 'pending'/);
+  assert.match(triggerPayload.script, /status: 'running'/);
+  assert.match(triggerPayload.script, /if \(!__isActive\(\)\) \{ return; \}/);
+  assert.match(triggerPayload.script, /__outputChars < 56000/);
+  assert.match(triggerPayload.script, /__writeChunks\(__output\.join\(''\), __outputOriginalChars, __isActive\)/);
+  assert.match(triggerPayload.script, /__deleteWrittenChunks/);
+  assert.match(triggerPayload.script, /status !== 'running'/);
   assert.deepEqual(result.runtimeIdentity, {
     userName: 'system',
     userId: 'system-id',
@@ -222,7 +248,7 @@ test('sys_trigger wrapper captures bounded scheduler runtime identity', async ()
  * test can assert nothing is left behind.
  */
 function makeTriggerClient({ envelope, chunks = {}, failChunkRead = false }) {
-  const state = { polls: 0, deleted: [], chunkQueries: 0 };
+  const state = { polls: 0, deleted: [], chunkQueries: 0, patches: [] };
   const props = { ...chunks };
   return {
     state,
@@ -252,6 +278,9 @@ function makeTriggerClient({ envelope, chunks = {}, failChunkRead = false }) {
       for (const name of Object.keys(props)) {
         if (`id-${name}` === sysId) delete props[name];
       }
+    },
+    async patch(endpoint, body) {
+      state.patches.push({ endpoint, body });
     },
   };
 }
@@ -369,7 +398,7 @@ test('every chunk and the parent are deleted on the success path', async () => {
   assert.ok(client.state.deleted.includes('prop-id'), 'the parent must be deleted too');
 });
 
-test('chunks written by a late trigger are cleaned up after a timeout', async () => {
+test('timeout cancels the trigger, removes chunks, and reports uncertain execution state', async () => {
   // The trigger can run after we stop waiting. Leaving its chunks behind would
   // accumulate orphaned sys_properties rows on every timed-out execution.
   const client = makeTriggerClient({ envelope: { status: 'pending' } });
@@ -385,7 +414,28 @@ test('chunks written by a late trigger are cleaned up after a timeout', async ()
   const result = await service.executeBackgroundScript('slow()', 30);
 
   assert.equal(result.outcome, 'timed_out');
+  assert.equal(result.executionState, 'unknown_after_timeout');
+  assert.match(result.error, /verify their effects before retrying/i);
+  assert.ok(client.state.deleted.includes('trigger-id'));
+  assert.deepEqual(client.state.patches, [
+    {
+      endpoint: '/api/now/table/sys_properties/prop-id',
+      body: { value: JSON.stringify({ status: 'cancelled' }) },
+    },
+  ]);
   assert.deepEqual(Object.keys(client.props), []);
+});
+
+test('a malformed completed envelope is rejected before it can drive chunk reads', async () => {
+  const client = makeTriggerClient({
+    envelope: { status: 'done', success: true, chunkCount: 1_000_000 },
+  });
+
+  await assert.rejects(
+    fastService(client).executeBackgroundScript('run()', 5000),
+    /invalid envelope.*chunkCount must be an integer/i,
+  );
+  assert.equal(client.state.chunkQueries, 1, 'only the bounded cleanup sweep may enumerate chunks');
 });
 
 test('a failed chunk read degrades to an explicit incomplete result, not a lost run', async () => {
@@ -411,9 +461,16 @@ test('timings separate scheduler wait from script runtime and count polls', asyn
 
   assert.equal(result.timings.scriptDurationMs, 42);
   assert.equal(typeof result.timings.totalDurationMs, 'number');
+  assert.equal(typeof result.timings.setupDurationMs, 'number');
+  assert.equal(typeof result.timings.pollingDurationMs, 'number');
+  assert.equal(typeof result.timings.payloadReadDurationMs, 'number');
   assert.equal(typeof result.timings.cleanupDurationMs, 'number');
   assert.ok(result.timings.pollCount >= 1);
   assert.ok(result.timings.observedSchedulerWaitMs >= 0, 'must never be negative');
+  assert.equal(
+    result.timings.observedSchedulerWaitUpperBoundMs,
+    result.timings.observedSchedulerWaitMs,
+  );
 });
 
 test('scheduler wait is omitted when the script did not report its own duration', async () => {

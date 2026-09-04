@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createExecuteBackgroundScriptTool } from '../build/tools/execute-background-script-tool.js';
 
 /** A ScriptService that reports a clean, successful run. */
-function makeScriptService(output = '0 records found') {
+function makeScriptService(output = '0 records found', overrides = {}) {
   return {
     async executeBackgroundScript() {
       return {
@@ -12,6 +12,9 @@ function makeScriptService(output = '0 records found') {
         executionTime: 1200,
         executionPath: 'sys_trigger',
         outcome: 'completed',
+        executionState: 'completed',
+		instanceName: 'dev',
+		...overrides,
       };
     },
     getExecutionTransportStatus() {
@@ -165,4 +168,97 @@ test('a table the script never references is not probed', async () => {
   await tool.handler({ script: "var gr = new GlideRecord('incident'); gr.query();" });
 
   assert.deepEqual(schemaService.calls, ['incident']);
+});
+
+test('a write-only GlideRecord does not produce a read-visibility warning', async () => {
+  const schemaService = makeSchemaService({
+    x_acme_widget: {
+      exists: true,
+      wsAccess: false,
+      readAccess: false,
+      owningScope: { sysId: 'abc', name: 'x_acme' },
+    },
+  });
+  const tool = createExecuteBackgroundScriptTool(makeScriptService('created'), schemaService);
+
+  const res = await tool.handler({
+    script:
+      "var gr = new GlideRecord('x_acme_widget'); gr.initialize(); gr.setValue('name', 'x'); gr.insert();",
+    allowWrites: true,
+  });
+
+  assert.equal(res.structuredContent.visibilityWarnings, undefined);
+  assert.deepEqual(schemaService.calls, []);
+});
+
+test('a reported runtime scope suppresses a matching owning-scope warning', async () => {
+  const schemaService = makeSchemaService({
+    sn_ai_observe_scoring_provider: {
+      exists: true,
+      wsAccess: false,
+      readAccess: false,
+      owningScope: { sysId: 'abc', name: 'sn_ai_observe' },
+    },
+  });
+  const service = makeScriptService('rows: 1', {
+    runtimeIdentity: { userName: 'system', scopeName: 'sn_ai_observe' },
+  });
+
+  const res = await createExecuteBackgroundScriptTool(service, schemaService).handler({ script: SCRIPT });
+
+  assert.equal(res.structuredContent.visibilityWarnings, undefined);
+  assert.equal(res.structuredContent.runtimeContext.observedIdentity.scopeName, 'sn_ai_observe');
+});
+
+test('a differing reported runtime scope is attached without guessing global scope', async () => {
+  const schemaService = makeSchemaService({
+    sn_ai_observe_scoring_provider: {
+      exists: true,
+      wsAccess: false,
+      readAccess: false,
+      owningScope: { sysId: 'abc', name: 'sn_ai_observe' },
+    },
+  });
+  const service = makeScriptService('rows: 0', {
+    runtimeIdentity: { userName: 'system', scopeName: 'x_other' },
+  });
+
+  const res = await createExecuteBackgroundScriptTool(service, schemaService).handler({ script: SCRIPT });
+  const warning = res.structuredContent.visibilityWarnings[0];
+
+  assert.equal(warning.executionScope, 'x_other');
+  assert.doesNotMatch(warning.reason, /runs in global scope/i);
+});
+
+test('transport health is recorded under the resolved instance, not the literal default key', async () => {
+  const { resetTransportHealth, transportHealth } = await import('../build/utils/transport-health.js');
+  resetTransportHealth();
+  const service = makeScriptService('ok', {
+    instanceName: 'named-default',
+    timings: {
+      totalDurationMs: 100,
+      setupDurationMs: 10,
+      pollingDurationMs: 60,
+      payloadReadDurationMs: 10,
+      cleanupDurationMs: 20,
+      pollCount: 1,
+    },
+  });
+
+  await createExecuteBackgroundScriptTool(service).handler({ script: "gs.info('ok')" });
+
+  assert.equal(transportHealth('default'), undefined);
+  assert.equal(transportHealth('named-default').samples, 1);
+  resetTransportHealth();
+});
+
+test('resultMode json rejects an oversized final JSON line before parsing it', async () => {
+  const giant = JSON.stringify({ success: true, payload: 'x'.repeat(21_000) });
+  const tool = createExecuteBackgroundScriptTool(makeScriptService(giant));
+
+  const res = await tool.handler({ script: "gs.info('{}')", resultMode: 'json' });
+
+  assert.equal(res.isError, true);
+  assert.match(res.structuredContent.warning, /maximum is 20000/i);
+  assert.equal(res.structuredContent.applicationResult, undefined);
 });

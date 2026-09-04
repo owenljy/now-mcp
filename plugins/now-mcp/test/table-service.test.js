@@ -123,6 +123,98 @@ test('now-sdk query fallback is limited to independent-path failures', () => {
 	assert.equal(shouldFallbackToNowSdkQuery(new ServiceNowError('Bad query', 400)), false);
 });
 
+test('queryRecords uses now-sdk for a 403 only when metadata confirms REST is disabled', async () => {
+	const client = makeStubClient();
+	client.getWithHeaders = async () => {
+		throw new ServiceNowError('Forbidden', 403);
+	};
+	const profileCalls = [];
+	const schemaService = {
+		async getTableAccessProfile(table, instance) {
+			profileCalls.push({ table, instance });
+			return { exists: true, readAccess: true, wsAccess: false };
+		},
+	};
+	const fallbackCalls = [];
+	const nowSdkQuery = (url, table, options) => {
+		fallbackCalls.push({ url, table, options });
+		return {
+			ok: true,
+			records: [{ sys_id: 'a'.repeat(32), number: 'INC0001' }],
+			hasMore: false,
+			nextOffset: null,
+			profile: 'dev-admin',
+		};
+	};
+	const svc = new TableService(makeManager(client), schemaService, nowSdkQuery);
+
+	const out = await svc.queryRecordsWithMeta(
+		'incident',
+		{ query: 'active=true', allowNowSdkFallback: true },
+		'dev',
+	);
+
+	assert.deepEqual(profileCalls, [{ table: 'incident', instance: 'dev' }]);
+	assert.equal(fallbackCalls.length, 1);
+	assert.equal(fallbackCalls[0].url, 'https://dev.service-now.com');
+	assert.equal(out.source, 'now-sdk-query');
+	assert.equal(out.fallbackProfile, 'dev-admin');
+	assert.equal(out.records[0].number, 'INC0001');
+});
+
+test('queryRecords never turns an ordinary or unverified 403 into an implicit fallback', async () => {
+	for (const { allowNowSdkFallback, accessProfile } of [
+		{ allowNowSdkFallback: false, accessProfile: { exists: true, wsAccess: false } },
+		{ allowNowSdkFallback: true, accessProfile: { exists: true, wsAccess: true } },
+		{ allowNowSdkFallback: true, accessProfile: { exists: true } },
+	]) {
+		const client = makeStubClient();
+		client.getWithHeaders = async () => {
+			throw new ServiceNowError('Forbidden', 403);
+		};
+		let fallbackCalls = 0;
+		const schemaService = {
+			async getTableAccessProfile() {
+				return accessProfile;
+			},
+		};
+		const svc = new TableService(makeManager(client), schemaService, () => {
+			fallbackCalls += 1;
+			return { ok: false, reason: 'must not run' };
+		});
+
+		await assert.rejects(
+			() => svc.queryRecordsWithMeta('incident', { allowNowSdkFallback }),
+			/Forbidden/,
+		);
+		assert.equal(fallbackCalls, 0);
+	}
+});
+
+test('a failed 403 access-profile probe preserves the original denial', async () => {
+	const original = new ServiceNowError('Original forbidden', 403);
+	const client = makeStubClient();
+	client.getWithHeaders = async () => {
+		throw original;
+	};
+	const schemaService = {
+		async getTableAccessProfile() {
+			throw new Error('metadata unavailable');
+		},
+	};
+	let fallbackCalls = 0;
+	const svc = new TableService(makeManager(client), schemaService, () => {
+		fallbackCalls += 1;
+		return { ok: false, reason: 'must not run' };
+	});
+
+	await assert.rejects(
+		() => svc.queryRecordsWithMeta('incident', { allowNowSdkFallback: true }),
+		(error) => error === original,
+	);
+	assert.equal(fallbackCalls, 0);
+});
+
 test('queryRecords blocks XSS-style queries via sanitizeQuery', async () => {
   const client = makeStubClient();
   const svc = new TableService(makeManager(client));

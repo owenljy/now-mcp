@@ -69,6 +69,13 @@ export const QueryRecordsSchema = z.object({
 		.describe(
 			'Fetch fields from referenced records in the SAME request, e.g. {"caller_id":["name","email"]}. One level deep. Routed via GraphQL; falls back to dot-walked fields if unavailable.',
 		),
+	allowNowSdkFallback: z
+		.boolean()
+		.optional()
+		.default(false)
+		.describe(
+			'Explicitly allow an aligned now-sdk auth profile to serve this read when the Table API returns 403 AND sys_db_object.ws_access is confirmed off. Never bypasses an ordinary ACL 403 or an unknown access verdict; the response reports source and profile.',
+		),
 	skipFieldValidation: skipFieldValidationField.default(false),
 });
 

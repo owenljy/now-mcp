@@ -2,11 +2,36 @@
 
 ## Status
 
-- Proposal only; no implementation has been started.
+- Implemented in 2.1.0 and hardened in 2.1.1.
 - Target package: `plugins/now-mcp`
 - Compatibility constraint: do not add a new MCP tool.
-- Existing calls must remain backward compatible.
-- Privileged reads must never be selected silently.
+- Existing calls remain backward compatible; new behavior is additive.
+- Alternate-identity reads are never selected for an ordinary or unverified 403.
+
+### Final implementation decision
+
+The Phase 0 spike did **not** establish a trustworthy, general way to set an
+arbitrary `sys_trigger` execution scope. A global/scheduled GlideRecord read can
+therefore still return a successful false zero for `read_access=false` tables.
+The proposed scoped privileged-read backend in Phases 3–4 was not shipped.
+
+Instead, 2.1.1 uses the already aligned, read-only `now-sdk query` path for
+`sn_query_records` recovery:
+
+- independent network, authentication, server, and circuit-breaker failures may
+  use the existing aligned now-sdk fallback;
+- a 403 requires `allowNowSdkFallback:true` **and** a metadata profile proving
+  `exists=true` and `ws_access=false`;
+- `ws_access=true`, unknown metadata, and ordinary ACL failures never switch
+  identity;
+- responses name `transport: "now-sdk-query"` and the independent auth profile;
+- aggregate reads have no alternate fallback because now-sdk does not preserve
+  Stats API semantics.
+
+The shipped transport hardening is separate from read fallback: background
+scripts now report runtime scope when available, warn on potentially invisible
+tables, bound and validate mailbox output, cancel pending triggers on failure or
+timeout, and report timeout state as uncertain.
 
 ## Background
 
@@ -45,56 +70,51 @@ misleading result:
 This creates the following priority order:
 
 1. Prevent semantically incorrect scope-limited reads.
-2. Integrate explicit privileged reads into existing read tools.
+2. Integrate explicit alternate-identity recovery into the existing query tool.
 3. Make the `sys_trigger` transport fast, observable, and capable of returning bounded
    structured results without losing data.
 4. Reduce discovery payload and schema-analysis noise.
 
 ## Design principles
 
-The implementation must follow these rules:
+The implementation follows these rules:
 
-1. **No new MCP tool names.** Scope-aware reads are added to
-   `sn_query_records` and `sn_aggregate_records`.
-2. **Backward-compatible defaults.** Existing calls continue to use the current API-user
-   execution path.
-3. **No silent identity change.** A Table API failure must not silently retry as
-   `system` or another scheduled-job identity.
-4. **Double opt-in for privileged reads.** The caller and instance configuration must
-   both authorize the privileged path.
-5. **Scope must be proven.** When owning-scope execution cannot be established, the tool
-   must fail or warn rather than execute in global scope and return a potentially false
-   empty result.
-6. **One output contract.** Table API and privileged backends should return the existing
-   columnar records, pagination, aggregate, warning, and truncation shapes.
-7. **Declarative privileged reads only.** The read tools generate bounded server-side
-   operations internally; callers do not provide JavaScript.
+1. **No new MCP tool names.** Recovery is additive to `sn_query_records`.
+2. **Backward-compatible defaults.** Existing calls continue to use the API-user path.
+3. **No silent 403 identity change.** A request flag and confirmed table-wide REST block
+   are both required.
+4. **Host alignment is mandatory.** now-sdk must have a profile for the same instance URL.
+5. **Scope uncertainty stays visible.** Background reads of `read_access=false` tables
+   remain inconclusive unless the runtime reports the owning scope.
+6. **One query output contract.** Table API and now-sdk return the same columnar records,
+   pagination, warnings, and truncation shape.
+7. **Aggregate semantics are not approximated.** Stats API failures remain failures.
 
 ## Target architecture
 
 ```text
-sn_query_records / sn_aggregate_records
+             sn_query_records
                     |
                     v
-          Read Transport Router
-                    |
-          +---------+---------+
-          |                   |
-          v                   v
-   Table/Stats API      Scoped Read Backend
-   API-user identity    Explicit privileged identity
-          |                   |
-          +---------+---------+
+          Existing validation/policy
                     |
                     v
-    Existing validation, pagination, columnar output,
-          render caps, hints, and response schemas
+           Table API (preferred)
+                    |
+          confirmed ws_access=false 403
+          + allowNowSdkFallback=true
+                    |
+                    v
+       host-aligned now-sdk query profile
+                    |
+                    v
+      Existing columnar/render response contract
 ```
 
-The router should be an internal service, not an exposed MCP tool. A possible location is
-`src/services/read-transport-service.ts`.
+The routing stays internal to `TableService`; no new exposed tool or privileged script
+backend is introduced.
 
-## Phase 0: Validate ServiceNow scope execution
+## Phase 0: Validate ServiceNow scope execution — completed with a negative result
 
 This spike is a prerequisite for claiming that privileged reads are scope-aware.
 
@@ -115,8 +135,8 @@ This spike is a prerequisite for claiming that privileged reads are scope-aware.
 | --- | --- | --- |
 | `true` | `true` | Table API |
 | `true` | `false` | Table API; do not switch to a global script |
-| `false` | `true` | Explicit privileged background read |
-| `false` | `false` | Owning-scope background read; reject if scope cannot be established |
+| `false` | `true` | Explicit aligned now-sdk read |
+| `false` | `false` | Explicit aligned now-sdk read; never trust an unqualified background zero |
 
 ### Deliverables
 
@@ -133,7 +153,7 @@ This spike is a prerequisite for claiming that privileged reads are scope-aware.
 - No implementation may treat a global zero-row result as conclusive for a table with
   `read_access=0`.
 
-## Phase 1: Prevent silent-zero correctness failures
+## Phase 1: Prevent silent-zero correctness failures — shipped in 2.1.0
 
 This phase can ship independently before privileged routing is complete.
 
@@ -231,7 +251,7 @@ Likely files:
 - Existing Table API and background-script behavior remains unchanged when no warning is
   applicable.
 
-## Phase 2: Strengthen the `sys_trigger` transport
+## Phase 2: Strengthen the `sys_trigger` transport — shipped in 2.1.0, hardened in 2.1.1
 
 This phase creates the transport foundation required by bounded declarative privileged
 reads.
@@ -332,7 +352,13 @@ name it `observedSchedulerWaitMs` and state how it is derived.
 - P95 completion detection adds no more than two seconds compared with fixed polling.
 - No temporary parent or chunk properties remain after tested success and failure paths.
 
-## Phase 3: Add privileged reads to `sn_query_records`
+## Phase 3: Add privileged reads to `sn_query_records` — superseded
+
+This original design is retained below as decision history. It was superseded by
+the explicit, aligned now-sdk fallback described in the status section because
+owning-scope `sys_trigger` execution could not be proven. The shipped input is
+`allowNowSdkFallback`, defaults to false, and does not add an instance-level
+privileged execution capability.
 
 ### 3.1 Extend the existing input schema
 
@@ -467,7 +493,11 @@ Additional rules:
   tool contract.
 - Effective identity and execution scope are present whenever privileged access was used.
 
-## Phase 4: Add privileged reads to `sn_aggregate_records`
+## Phase 4: Add privileged reads to `sn_aggregate_records` — not implemented
+
+This phase remains intentionally out of scope. now-sdk query does not implement
+the Stats API's aggregate semantics, and silently approximating them would make
+the alternate path less trustworthy than the failing request.
 
 Add the same `privilegedRead` field and reuse the internal Read Transport Router.
 
@@ -495,7 +525,7 @@ Apply the existing high-cardinality and render protections before and after rout
 - Unsupported semantics fail explicitly.
 - Privileged results report identity, scope, transport, and timing.
 
-## Phase 5: Improve discovery and response economy
+## Phase 5: Improve discovery and response economy — shipped in 2.1.1
 
 ### 5.1 Rank and paginate `sn_list_tables`
 
@@ -544,9 +574,10 @@ The tool already accepts an instance filter, so no new tool or input concept is 
 - Exact and prefix matches consistently appear before incidental substring matches.
 - Broad searches clearly signal that more matches exist.
 - Typical discovery calls return materially less payload without hiding pagination.
-- Connection status no longer repeats identical diagnostic paragraphs per instance.
+- Connection status exposes a shared diagnostic map while retaining the per-instance
+  diagnostic required by the 2.x output contract.
 
-## Phase 6: Reduce schema-preflight false positives
+## Phase 6: Reduce schema-preflight false positives — shipped in 2.1.0/2.1.1
 
 The background-script analyzer currently treats feature checks such as
 `gr.getFields ? ...` and `gr.getElements ? ...` as potential fields because these API
@@ -566,7 +597,7 @@ Changes:
 - Existing real-field typo tests continue to pass.
 - Dynamic and unresolved references remain advisory rather than blocking.
 
-## Proposed pull-request sequence
+## Original proposed pull-request sequence
 
 | PR | Scope | Relative risk | Dependency |
 | --- | --- | --- | --- |
@@ -587,20 +618,17 @@ Run these tests only against a non-production instance or approved safe fixtures
 
 1. **Table API preferred:** `ws_access=true`, `read_access=false`; the tool reads through
    the Table API and does not escalate.
-2. **Explicit privileged fallback:** `ws_access=false`, `read_access=true`; the default
-   call returns 403 and the double-opt-in call succeeds.
-3. **Owning-scope requirement:** `ws_access=false`, `read_access=false`; owning-scope
-   execution succeeds, while global execution is rejected or marked inconclusive.
+2. **Explicit alternate fallback:** `ws_access=false`; the default call returns 403 and
+   `allowNowSdkFallback=true` succeeds only with a host-aligned profile.
+3. **Owning-scope warning:** `read_access=false`; a background zero remains inconclusive
+   unless the reported runtime scope equals the owning scope.
 4. **Output reconstruction:** a result larger than 2.7 KB is reconstructed exactly up to
    the documented cap.
-5. **Pagination:** a privileged page that exceeds the cap returns a stable next offset and
+5. **Discovery pagination:** ranked table/field pages continue through stable offsets with
    no duplicated or skipped rows.
-6. **Configuration gate:** `privilegedRead=true` is refused when the instance capability is
-   disabled.
-7. **Identity disclosure:** every privileged response includes effective identity,
-   execution scope, and transport.
-8. **Semantic parity:** supported query and aggregate operations match the corresponding
-   Table/Stats API results on tables visible through both paths.
+6. **403 gate:** `ws_access=true` and unknown metadata never invoke now-sdk fallback.
+7. **Identity disclosure:** every alternate response names the now-sdk profile and source.
+8. **Aggregate integrity:** aggregate failures never route to an approximate backend.
 9. **Transport load:** adaptive polling meets the request-reduction target.
 10. **Cleanup:** no temporary parent, chunk, or trigger records remain after success,
     failure, and timeout tests.
@@ -627,24 +655,20 @@ pnpm check
 
 Transport and scope PRs additionally require the non-production live verification matrix.
 
-## Rollout strategy
+## Shipped rollout behavior
 
-1. Ship access warnings and corrected hints first.
-2. Ship transport improvements without enabling privileged reads.
-3. Release the input field and instance configuration with
-   `allowPrivilegedReads=false` everywhere.
-4. Enable it on one non-production instance and observe identity, scope, latency,
-   truncation, cleanup, and error metrics.
-5. Expand to additional non-production instances only after semantic parity is confirmed.
-6. Require an explicit production configuration change and security review before enabling
-   privileged reads in production.
+1. Access warnings and corrected 403 hints ship for every caller.
+2. Transport hardening changes no configured execution route.
+3. `allowNowSdkFallback` defaults to false and is evaluated per request.
+4. The fallback requires an aligned host and reports the actual profile every time.
+5. There is no background-script privileged-read capability to enable in configuration.
 
 Recommended operational counters:
 
 - normal read attempts
-- privileged read requests
-- privileged routes actually used
-- privileged requests refused by configuration
+- explicit now-sdk fallback requests
+- now-sdk fallback routes actually used
+- 403 fallbacks refused because access metadata was unknown or `ws_access=true`
 - access-profile lookup failures
 - scope-resolution failures
 - background silent-zero warnings
@@ -655,12 +679,12 @@ Recommended operational counters:
 
 ## Security considerations
 
-- A scheduled-job identity may see more records than the API user. The response must make
-  this visible every time privileged routing is used.
-- `privilegedRead=true` is not sufficient without the instance-level capability.
-- The privileged backend accepts declarative operations only; it must not expose caller
-  JavaScript through the existing read tools.
-- Table blocklists, query-risk checks, field validation, and output caps remain active.
+- The now-sdk profile may see more records than the API user. Every successful fallback
+  names that independent source and profile.
+- `allowNowSdkFallback=true` is insufficient for a 403 without metadata-confirmed
+  `ws_access=false` and a host-aligned now-sdk profile.
+- Table blocklists, query-risk checks, field validation, and output caps run before the
+  declarative now-sdk query and remain active.
 - Read-only logical operations may require temporary control-plane writes for the mailbox.
   These must be isolated from general mutation authorization and fully cleaned up.
 - Tool logs must not record credentials or full sensitive payloads. Client-side conversation
@@ -684,8 +708,9 @@ The program is complete when all of the following are true:
 - No new MCP tool name has been introduced.
 - Existing query and aggregate requests behave as before by default.
 - A scope-restricted background read cannot return an unqualified silent-zero result.
-- Privileged routing requires both request-level and instance-level authorization.
-- Owning scope and effective identity are reported for every privileged response.
+- An alternate-identity 403 fallback requires explicit request authorization plus a
+  metadata-confirmed table-wide REST block.
+- The now-sdk source and profile are reported for every successful alternate read.
 - Table API remains preferred whenever it succeeds.
 - Normal ACL failures with `ws_access=true` never trigger privileged fallback.
 - Results larger than 2.7 KB are reconstructed or reliably paginated.
@@ -694,12 +719,13 @@ The program is complete when all of the following are true:
   poll count.
 - Discovery results are ranked and expose pagination/incompleteness.
 - `getFields` and `getElements` no longer produce schema-preflight false positives.
-- Unit tests, static checks, and the non-production live verification matrix pass.
-- Privileged reads remain disabled by default in shipped configuration.
+- Unit tests and static checks pass; live claims remain limited to the recorded spike.
+- Alternate-identity 403 fallback remains disabled by default.
 
-## Rough sizing
+## Completion note
 
-The largest uncertainty is whether `sys_trigger` can reliably execute in the owning
-application scope. Subject to the Phase 0 result, the complete program is approximately
-five to six independently reviewable pull requests and roughly two to three engineer-weeks
-of implementation, tests, live validation, and documentation.
+The original sizing assumed a new scoped execution backend. That backend was
+cancelled after the negative Phase 0 result. The delivered scope consists of
+correctness warnings, explicit aligned now-sdk recovery, bounded background
+transport, stable discovery ranking/pagination, cache identity isolation, tests,
+and documentation.

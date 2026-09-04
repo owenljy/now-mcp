@@ -245,6 +245,11 @@ const DiscoveryPaginationSchema = z.object({
 	limit: z.number(),
 	offset: z.number(),
 	hasMore: z.boolean(),
+	nextOffset: z.number().optional(),
+	/** Number of rows fetched and ranked locally. */
+	candidateCount: z.number().optional(),
+	/** False when the instance reported more matches than the bounded candidate window. */
+	rankingComplete: z.boolean().optional(),
 	totalMatching: z.number().optional(),
 });
 
@@ -257,6 +262,7 @@ export const ListTablesOutputSchema = z.object({
 	...columnarShape('table'),
 	/** Rows are relevance-ordered, not in the instance's name order. */
 	ranked: z.boolean().optional(),
+	rankingScope: z.enum(['complete', 'candidate_window']).optional(),
 	pagination: DiscoveryPaginationSchema.optional(),
 	truncated: z.boolean().optional(),
 	truncationReason: z.enum(['row_count', 'row_bytes']).optional(),
@@ -271,6 +277,7 @@ export const FindFieldsOutputSchema = z.object({
 	instance: z.string(),
 	...columnarShape('field'),
 	ranked: z.boolean().optional(),
+	rankingScope: z.enum(['complete', 'candidate_window']).optional(),
 	pagination: DiscoveryPaginationSchema.optional(),
 	/**
 	 * How the matches spread across tables, on a broad search. A concept that
@@ -323,10 +330,15 @@ export const ExecuteScriptOutputSchema = z.object({
 	timings: z
 		.object({
 			totalDurationMs: z.number(),
-			/** DERIVED (total − script − cleanup), not read from the scheduler's own
-			 * clock. Absent when the script did not report its duration. */
+			setupDurationMs: z.number(),
+			pollingDurationMs: z.number(),
+			/** Upper bound derived from polling − script − output persistence; not read
+			 * from the scheduler's clock. Absent without a reported script duration. */
 			observedSchedulerWaitMs: z.number().optional(),
+			observedSchedulerWaitUpperBoundMs: z.number().optional(),
 			scriptDurationMs: z.number().optional(),
+			outputPersistenceDurationMs: z.number().optional(),
+			payloadReadDurationMs: z.number(),
 			cleanupDurationMs: z.number(),
 			pollCount: z.number(),
 		})
@@ -349,6 +361,7 @@ export const ExecuteScriptOutputSchema = z.object({
 		.optional(),
 	executionPath: z.enum(['scripted-rest', 'sys_trigger']).optional(),
 	outcome: z.enum(['completed', 'script_failed', 'timed_out']).optional(),
+	executionState: z.enum(['completed', 'failed', 'unknown_after_timeout']).optional(),
 	// Slimmed to just the observed identity — identityNote/writeResultContract
 	// were static prose, moved into the tool description. Omitted entirely when
 	// the transport didn't report an identity.
@@ -359,6 +372,7 @@ export const ExecuteScriptOutputSchema = z.object({
 				userId: z.string().optional(),
 				roles: z.string().optional(),
 				isInteractive: z.boolean().optional(),
+				scopeName: z.string().optional(),
 			}),
 		})
 		.optional(),
@@ -385,6 +399,7 @@ export const ExecuteScriptOutputSchema = z.object({
 				/** False ⇒ an empty result from this script proves nothing about the table. */
 				emptyResultIsConclusive: z.boolean(),
 				recommendedTransport: z.string().optional(),
+				owningScope: z.string().optional(),
 			}),
 		)
 		.optional(),

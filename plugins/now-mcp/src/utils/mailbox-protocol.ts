@@ -42,7 +42,7 @@ export const MAX_TOTAL_CHARS = CHUNK_CHARS * MAX_CHUNKS;
 
 /** The status envelope the wrapper writes into the parent property. */
 export interface MailboxEnvelope {
-	status: 'pending' | 'done';
+	status: 'pending' | 'running' | 'cancelled' | 'done';
 	success?: boolean;
 	/** Number of chunk properties written. Absent/0 on the legacy single-mailbox
 	 * shape, where the payload sits inline in `output`/`error`. */
@@ -61,6 +61,90 @@ export interface MailboxEnvelope {
 	chunkWriteFailed?: boolean;
 	/** Wall-clock ms the script body itself took, measured inside the trigger. */
 	scriptDurationMs?: number;
+	/** Time spent persisting output chunks before publishing the done envelope. */
+	outputPersistenceDurationMs?: number;
+}
+
+export interface MailboxEnvelopeValidation {
+	valid: boolean;
+	envelope?: MailboxEnvelope;
+	error?: string;
+}
+
+/**
+ * Validate the instance-controlled mailbox value before using it for loop bounds
+ * or exposing it through a typed response. A malformed/compromised property must
+ * not be able to turn `chunkCount` into an unbounded CPU loop in this process.
+ */
+export function validateMailboxEnvelope(value: unknown): MailboxEnvelopeValidation {
+	if (!value || typeof value !== 'object' || Array.isArray(value)) {
+		return { valid: false, error: 'mailbox value is not an object' };
+	}
+	const candidate = value as Record<string, unknown>;
+	if (!['pending', 'running', 'cancelled', 'done'].includes(String(candidate.status))) {
+		return { valid: false, error: 'mailbox status is invalid' };
+	}
+	if (candidate.status === 'done' && typeof candidate.success !== 'boolean') {
+		return { valid: false, error: 'completed mailbox has no boolean success field' };
+	}
+	if (
+		candidate.chunkCount !== undefined &&
+		(!Number.isInteger(candidate.chunkCount) ||
+			(candidate.chunkCount as number) < 0 ||
+			(candidate.chunkCount as number) > MAX_CHUNKS)
+	) {
+		return { valid: false, error: `chunkCount must be an integer from 0 to ${MAX_CHUNKS}` };
+	}
+	for (const field of ['scriptDurationMs', 'outputPersistenceDurationMs'] as const) {
+		const metric = candidate[field];
+		if (
+			metric !== undefined &&
+			(typeof metric !== 'number' || !Number.isFinite(metric) || metric < 0)
+		) {
+			return { valid: false, error: `${field} must be a finite non-negative number` };
+		}
+	}
+	for (const field of ['outputOriginalChars', 'outputReturnedChars'] as const) {
+		const count = candidate[field];
+		if (count !== undefined && (!Number.isSafeInteger(count) || (count as number) < 0)) {
+			return { valid: false, error: `${field} must be a non-negative safe integer` };
+		}
+	}
+	if (
+		typeof candidate.outputReturnedChars === 'number' &&
+		candidate.outputReturnedChars > MAX_TOTAL_CHARS
+	) {
+		return { valid: false, error: `outputReturnedChars cannot exceed ${MAX_TOTAL_CHARS}` };
+	}
+	for (const field of ['outputTruncated', 'chunkWriteFailed'] as const) {
+		if (candidate[field] !== undefined && typeof candidate[field] !== 'boolean') {
+			return { valid: false, error: `${field} must be a boolean` };
+		}
+	}
+	for (const field of ['output', 'error'] as const) {
+		if (candidate[field] !== undefined && typeof candidate[field] !== 'string') {
+			return { valid: false, error: `${field} must be a string` };
+		}
+	}
+	if (candidate.runtimeIdentity !== undefined) {
+		if (
+			typeof candidate.runtimeIdentity !== 'object' ||
+			candidate.runtimeIdentity === null ||
+			Array.isArray(candidate.runtimeIdentity)
+		) {
+			return { valid: false, error: 'runtimeIdentity must be an object' };
+		}
+		const identity = candidate.runtimeIdentity as Record<string, unknown>;
+		for (const field of ['userName', 'userId', 'roles', 'scopeName']) {
+			if (identity[field] !== undefined && typeof identity[field] !== 'string') {
+				return { valid: false, error: `runtimeIdentity.${field} must be a string` };
+			}
+		}
+		if (identity.isInteractive !== undefined && typeof identity.isInteractive !== 'boolean') {
+			return { valid: false, error: 'runtimeIdentity.isInteractive must be a boolean' };
+		}
+	}
+	return { valid: true, envelope: candidate as unknown as MailboxEnvelope };
 }
 
 /** Property name for chunk `index` of the execution keyed by `parentKey`. */
@@ -98,8 +182,10 @@ export function reassembleChunks(
 		if (!name) continue;
 		const prefix = `${parentKey}.chunk.`;
 		if (!name.startsWith(prefix)) continue;
-		const index = Number.parseInt(name.slice(prefix.length), 10);
-		if (!Number.isInteger(index) || index < 0) continue;
+		const suffix = name.slice(prefix.length);
+		if (!/^\d+$/.test(suffix)) continue;
+		const index = Number.parseInt(suffix, 10);
+		if (!Number.isInteger(index) || index < 0 || index >= chunkCount) continue;
 		if (byIndex.has(index)) {
 			duplicates.push(index);
 			continue;
@@ -151,12 +237,24 @@ export function reassembleChunks(
  */
 export function chunkWriterSource(parentKeyLiteral: string): string {
 	return `
-	  var __writeChunks = function(text) {
-	    var __original = text.length;
+	  var __deleteWrittenChunks = function(count) {
+	    for (var __d = 0; __d < count; __d++) {
+	      try {
+	        var __dg = new GlideRecord('sys_properties');
+	        if (__dg.get('name', ${parentKeyLiteral} + '.chunk.' + __d)) { __dg.deleteRecord(); }
+	      } catch (__deleteError) {}
+	    }
+	  };
+		  var __writeChunks = function(text, originalChars, isActive) {
+		    var __original = typeof originalChars === 'number' ? originalChars : text.length;
 	    var __capped = text.length > ${MAX_TOTAL_CHARS} ? text.substring(0, ${MAX_TOTAL_CHARS}) : text;
 	    var __count = 0;
 	    var __failed = false;
 	    for (var __i = 0; __i * ${CHUNK_CHARS} < __capped.length && __i < ${MAX_CHUNKS}; __i++) {
+	      if (isActive && !isActive()) {
+	        __deleteWrittenChunks(__count);
+	        return {count: 0, truncated: __original > ${MAX_TOTAL_CHARS}, originalChars: __original, returnedChars: 0, failed: false, cancelled: true};
+	      }
 	      var __slice = __capped.substring(__i * ${CHUNK_CHARS}, (__i + 1) * ${CHUNK_CHARS});
 	      try {
 	        var __cg = new GlideRecord('sys_properties');
@@ -168,13 +266,18 @@ export function chunkWriterSource(parentKeyLiteral: string): string {
 	        if (!__cg.insert()) { __failed = true; }
 	        else { __count++; }
 	      } catch (__e) { __failed = true; }
+	      if (isActive && !isActive()) {
+	        __deleteWrittenChunks(__count);
+	        return {count: 0, truncated: __original > ${MAX_TOTAL_CHARS}, originalChars: __original, returnedChars: 0, failed: false, cancelled: true};
+	      }
 	    }
 	    return {
 	      count: __count,
 	      truncated: __original > ${MAX_TOTAL_CHARS},
 	      originalChars: __original,
 	      returnedChars: __capped.length,
-	      failed: __failed
+	      failed: __failed,
+	      cancelled: false
 	    };
 	  };
 	`;

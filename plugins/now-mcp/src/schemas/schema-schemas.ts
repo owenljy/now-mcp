@@ -70,7 +70,7 @@ export const ListTablesSchema = z.object({
 		.nonnegative()
 		.default(0)
 		.describe(
-			'Rows to skip, for paging through a broad search. Note that ranking applies WITHIN a page — page 2 is not "the next most relevant", it is the next slice of the underlying name-ordered result. Prefer a sharper filter/concept over paging.',
+			'Rows to skip in the stable relevance-ranked candidate set. Use pagination.nextOffset to continue; rankingComplete=false means the search was broader than the bounded candidate window and should be narrowed.',
 		),
 });
 
@@ -99,7 +99,7 @@ export const FindFieldsSchema = z.object({
 		.nonnegative()
 		.default(0)
 		.describe(
-			'Rows to skip. Ranking applies WITHIN a page, so page 2 is the next slice of the name-ordered result, not the next-most-relevant rows. A sharper keyword beats paging.',
+			'Rows to skip in the stable relevance-ranked candidate set. Use pagination.nextOffset to continue; rankingComplete=false means the search should be narrowed.',
 		),
 });
 

@@ -142,15 +142,15 @@ export function failureHints(text: string, ctx: FailureContext = {}): string[] {
 						//   - now-sdk query DID return the rows the script could not see,
 						//     on every read_access=0 table tested, including ws_access=0
 						//     tables that 403 the Table API.
-						'sn_execute_background_script CANNOT read this table: its transport always runs in global scope (sys_trigger has no scope field), and no GlideRecord variant escapes that. Use now-sdk query instead — verified to return rows here that the background script reports as zero, because a UI session is not a web-service call. If you do run a script anyway, print gs.getCurrentScopeName() and treat a zero-row result from global scope as proving nothing.',
+						'Re-run sn_query_records with allowNowSdkFallback:true to explicitly permit a host-aligned now-sdk query profile; that route is verified to return rows the global script cannot see. The default sys_trigger background transport CANNOT read this table: sys_trigger has no scope field. A separately configured Scripted REST endpoint may run in its own application scope, so trust its reported runtime scope rather than assuming. Treat any zero from a non-owning or unknown scope as proving nothing.',
 					);
 				} else if (ctx.readAccess === 'enabled') {
 					hints.push(
-						'read_access is on, so this table IS readable from another scope: sn_execute_background_script (GlideRecordSecure is not gated by ws_access) or now-sdk query will return real rows.',
+						'read_access is on, so this table is readable from another scope. Re-run sn_query_records with allowNowSdkFallback:true for the aligned now-sdk query route, or use sn_execute_background_script when a dedicated read cannot express the operation.',
 					);
 				} else {
 					hints.push(
-						'read_access for this table could not be determined, so a background script may or may not see its rows — and if it cannot, it returns zero silently rather than erroring. now-sdk query sidesteps the ambiguity: it reads through a UI session, which is not gated by either flag.',
+						'read_access could not be determined, so a background script may return zero silently. Because ws_access is confirmed off, you can explicitly re-run sn_query_records with allowNowSdkFallback:true; the aligned now-sdk query route is not gated by either table flag.',
 					);
 				}
 

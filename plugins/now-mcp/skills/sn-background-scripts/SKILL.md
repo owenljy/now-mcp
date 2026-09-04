@@ -19,10 +19,12 @@ file under `references/` so only the one you need gets read into context.
 - now-mcp can't authenticate against an account and you need to know which
   precondition is missing (Active, Locked out, password state, API access role,
   MFA) before guessing at a fix.
-- A table you need to read has `ws_access` off, so every Table-API read (query or
-  aggregate) returns 403 before any role/ACL check runs — a background script
-  with `GlideRecordSecure`/`GlideAggregate` is the only way in. now-mcp's 403
-  response names this case explicitly; trust that hint rather than chasing roles.
+- A table you need to inspect has `ws_access` off and the operation cannot be
+  expressed by `sn_query_records`. For ordinary record reads, prefer
+  `sn_query_records` with `allowNowSdkFallback:true`: it only uses an aligned
+  now-sdk profile after metadata confirms the table-wide REST block. A
+  background script is not a safe substitute when `read_access` is also off,
+  because a different application scope can return a successful false zero.
 
 ## When NOT to use
 
@@ -33,19 +35,24 @@ file under `references/` so only the one you need gets read into context.
 
 ## Transport limits
 
-The sys_trigger transport shapes what a script can return — budget for it before
-writing one, because every failure below reports the same opaque error.
+The sys_trigger transport uses bounded `sys_properties` chunks. It can carry up
+to 56,000 characters; the tool renders at most 8,000 characters and reports
+whether truncation happened in the mailbox (`mailbox_limit`) or at rendering
+(`render_cap`). Count and aggregate server-side and log one compact result rather
+than dumping rows.
 
-- **Output truncates at roughly 2.7 KB** (`truncationReason: "mailbox_limit"`).
-  Count and aggregate server-side with `GlideAggregate` and log one compact JSON
-  line; never dump rows expecting to read them all back.
-- **`resultMode: "json"` can fail a script that otherwise succeeds.** If you get
-  `script completed with failure` on a script whose final line is valid JSON,
-  re-run without `resultMode` before editing the script body.
-- **`script completed with failure` carries no cause.** Do not retry the same
-  shape — simplify first (fewer tables, no nested per-row queries, smaller
-  `setLimit`), and if the table is Table-API readable, prefer a plain query or
-  aggregate call over a script.
+- `resultMode: "json"` parses only the final output line, caps it at 20,000
+  characters, and requires a boolean `success` or `ok` property. A contract or
+  parse failure is reported separately from transport success.
+- Completed calls identify script, persistence, polling, payload-read and cleanup
+  timing. Scheduler wait is an upper bound because it includes polling detection
+  and request latency.
+- A timeout is `executionState: "unknown_after_timeout"`, not proof of
+  cancellation. The tool requests trigger cancellation and cleans the mailbox,
+  but a script already claimed by the scheduler may have run; verify mutations
+  before retrying.
+- Missing chunks, chunk-write failures and invalid envelopes are explicit errors.
+  Do not treat partial output as the script's complete result.
 
 ## Templates
 

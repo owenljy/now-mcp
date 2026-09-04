@@ -53,6 +53,7 @@ export class TableService {
 	constructor(
 		private instanceManager: InstanceManager,
 		private schemaService?: SchemaService,
+		private nowSdkQuery: typeof queryNowSdkWithAlignedProfile = queryNowSdkWithAlignedProfile,
 	) {}
 
 	/**
@@ -130,14 +131,36 @@ export class TableService {
 
 			return { records: data.result, totalCount, source: 'now-mcp' };
 		} catch (error) {
-			if (!shouldFallbackToNowSdkQuery(error)) throw error;
+			let useFallback = shouldFallbackToNowSdkQuery(error);
+			if (
+				!useFallback &&
+				options.allowNowSdkFallback === true &&
+				error instanceof ServiceNowError &&
+				error.statusCode === 403 &&
+				this.schemaService
+			) {
+				// A different auth identity must never turn an ordinary ACL denial into
+				// an implicit bypass. The independent route is allowed only when table
+				// metadata proves REST itself is disabled for every API user.
+				try {
+					const profile = await this.schemaService.getTableAccessProfile(tableName, resolved.name);
+					useFallback = profile?.exists === true && profile.wsAccess === false;
+				} catch (probeError) {
+					logger.debug('Table access profile probe failed; preserving the original 403', {
+						instance: resolved.name,
+						table: tableName,
+						error: probeError instanceof Error ? probeError.message : String(probeError),
+					});
+				}
+			}
+			if (!useFallback) throw error;
 
 			logger.warn('Native record query failed; trying aligned now-sdk query fallback', {
 				instance: resolved.name,
 				table: tableName,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			const fallback = queryNowSdkWithAlignedProfile(resolved.config.url, tableName, {
+			const fallback = this.nowSdkQuery(resolved.config.url, tableName, {
 				query: options.query ? sanitizeQuery(options.query) : undefined,
 				limit: options.limit,
 				offset: options.offset,

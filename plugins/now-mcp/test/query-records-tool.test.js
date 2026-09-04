@@ -104,6 +104,7 @@ test('403 with ws_access disabled explains the table-level block', async () => {
   const text = result.content.map((c) => c.text).join(' ');
   assert.match(text, /ws_access/);
   assert.match(text, /web service/i);
+	assert.match(text, /allowNowSdkFallback:true/);
   assert.doesNotMatch(text, /likely an acl.*lack the required role/i);
 });
 
@@ -140,6 +141,7 @@ test('403 on a scope-restricted table warns against trusting a global background
   const text = result.content.map((c) => c.text).join(' ');
   assert.match(text, /read_access/);
   assert.match(text, /ZERO ROWS/i);
+	assert.match(text, /allowNowSdkFallback:true/);
   assert.match(text, /sn_ai_observe/, 'the owning scope should be named');
 });
 
@@ -180,4 +182,38 @@ test('a non-403 error never triggers the ws_access probe', async () => {
   await tool.handler({ tableName: 'incident', limit: 5 });
 
   assert.equal(schemaService.calls.length, 0);
+});
+
+test('allowNowSdkFallback is forwarded and the alternate identity is explicit in the result', async () => {
+  const calls = [];
+  const tableService = {
+    async queryRecordsWithMeta(tableName, options, instance) {
+      calls.push({ tableName, options, instance });
+      return {
+        records: [{ sys_id: 'a'.repeat(32), number: 'INC0001' }],
+        totalCount: null,
+        hasMore: false,
+        source: 'now-sdk-query',
+        fallbackProfile: 'dev-admin',
+      };
+    },
+  };
+  const schemaService = {
+    async journalFieldsAmong() { return []; },
+    async fieldMetaAmong() { return {}; },
+  };
+  const tool = createQueryRecordsTool(tableService, schemaService);
+
+  const res = await tool.handler({
+    tableName: 'incident',
+    fields: ['number'],
+    allowNowSdkFallback: true,
+    skipFieldValidation: true,
+  });
+
+  assert.equal(calls[0].options.allowNowSdkFallback, true);
+  assert.equal(res.structuredContent.transport, 'now-sdk-query');
+  assert.match(res.structuredContent.warnings.join(' '), /independent now-sdk auth profile 'dev-admin'/i);
+  assert.equal(res._meta.source, 'now-sdk-query');
+  assert.equal(res._meta.fallbackProfile, 'dev-admin');
 });

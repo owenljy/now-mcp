@@ -133,9 +133,11 @@ After editing a YAML file, call `sn_reset_connection`. It re-reads and validates
 the YAML, rebuilds all instance clients, and only swaps them into the running
 server after the complete replacement configuration succeeds. Basic passwords,
 OAuth credentials, URLs, timeouts, and read-only settings therefore take effect
-without restarting the MCP. Plugin-form / `SERVICENOW_*` environment values are
-fixed when the MCP child process starts and still require a plugin reload or
-restart.
+without restarting the MCP. Schema caches are namespaced by host, auth principal,
+and configuration revision, so a reloaded account cannot inherit schema or
+access metadata fetched by the previous identity. Plugin-form / `SERVICENOW_*`
+environment values are fixed when the MCP child process starts and still require
+a plugin reload or restart.
 
 ### Basic-auth prerequisites and 401 troubleshooting
 
@@ -194,7 +196,7 @@ returns the full entry stream with timestamps and authors.
 ### Data (read & write runtime records)
 | Tool | What it does |
 |---|---|
-| `sn_query_records` | Read any table — encoded-query filters, field selection, **dot-walking**, pagination, display values, and `expand` for nested reference fields in one round trip; field names are checked before the query is sent; on MCP auth/transport failure, automatically tries an aligned `now-sdk query` profile |
+| `sn_query_records` | Read any table — encoded-query filters, field selection, **dot-walking**, pagination, display values, and `expand` for nested reference fields in one round trip; field names are checked before the query is sent; an aligned `now-sdk query` profile can recover independent transport/auth failures, or an explicitly approved, metadata-confirmed table-wide REST block |
 | `sn_aggregate_records` | Counts / group-by / avg / sum / min / max via the **Stats API** (server-side, cheap) |
 | `sn_create_records` | Insert **one or many** records (with schema field validation + typo hints, and write-routing guards) |
 | `sn_update_records` | Patch/replace **one or many** records by sys_id; verifies persistence by default and classifies silent non-persistence |
@@ -290,9 +292,12 @@ These four are one ladder, indexed by what you already know:
 `concept` matches label **and** name and OR's its keywords; combining it with
 `filter` ANDs the two. Both concept searches return a `matched` column naming
 which keyword hit each row, so a miss tells you which variant to change, and an
-empty result comes back with hints rather than a bare zero. Ranking is
-deliberately left to the caller — the instance returns no relevance order, and
-scope/parent-table/label-exactness are judgment calls, not an algorithm.
+empty result comes back with hints rather than a bare zero. Both tools fetch a
+stable bounded candidate set, rank exact and prefix hits ahead of incidental
+substrings, and then paginate that ranked order. `pagination.nextOffset`
+continues without re-ranking a different server page; `rankingComplete:false`
+means the match set exceeded the candidate window and should be narrowed before
+treating the order or field distribution as global.
 
 `sn_find_fields` always excludes Flow Designer's per-flow variable-pool tables
 (`var__m_*`). Measured on a live instance, searching field labels for
@@ -392,13 +397,20 @@ other.**
 
 `now-sdk query` authenticates through the CLI's own profile, not now-mcp's HTTP
 client credentials. Treat it as the first read-only diagnostic path when
-now-mcp authentication, transport, server, or circuit-breaker
-failures make repeated MCP calls unproductive. `sn_query_records` does this
-automatically when now-sdk >=4.8 is installed **and** an auth profile matches
-the selected MCP instance host. Successful fallback responses report
-`meta.source: "now-sdk-query"` and `meta.fallbackProfile`; the host check fails
-closed so recovery cannot silently query another environment. Writes never
-fall back to the CLI.
+now-mcp authentication, transport, server, or circuit-breaker failures make
+repeated MCP calls unproductive. `sn_query_records` automatically tries it for
+those independent-path failures when now-sdk >=4.8 is installed **and** an auth
+profile matches the selected MCP instance host.
+
+A 403 is stricter: ordinary and unknown ACL denials never switch identities.
+Set `allowNowSdkFallback:true` only when you explicitly accept the alternate
+read identity; now-mcp then probes `sys_db_object` and permits the fallback only
+when the table exists and `ws_access=false` confirms a table-wide REST block.
+Successful fallback responses identify `transport: "now-sdk-query"`,
+`meta.source`, and `meta.fallbackProfile`, plus a warning that the data came from
+the independent profile. The host check fails closed so recovery cannot silently
+query another environment. Writes and aggregate calls never fall back to the
+CLI.
 
 ### Auto-pairing the instance
 By default (`SERVICENOW_FOLLOW_NOW_SDK` on), the active instance follows whichever
@@ -448,8 +460,10 @@ Read schema with the MCP → write `*.now.ts` → `now-sdk deploy` (Bash) →
    not install that route. It must exist on every instance whose config selects it.
 2. **`sys_trigger` fallback:** when `scriptApiPath` is omitted, now-mcp creates a temporary
    `sys_properties` mailbox through the Table API, creates a Run Once `sys_trigger`, polls
-   the mailbox, and deletes it. The integration user needs create/read/delete access to
-   `sys_properties`, create access to `sys_trigger`, and an active ServiceNow scheduler.
+   the mailbox, and deletes it. Output is captured into at most 16 indexed chunks (56,000
+   characters total) before the tool's 8,000-character render cap. The integration user
+   needs create/read/delete access to `sys_properties`, create/delete access to
+   `sys_trigger`, and an active ServiceNow scheduler.
 
 If ServiceNow reports **“Requested URI does not represent any resource”**, use the phase and
 endpoint in the now-mcp error:
@@ -472,10 +486,21 @@ scripts that mutate data.
 
 On the `sys_trigger` path, completed calls include
 `runtimeContext.observedIdentity`, captured inside the scheduled job (bounded
-user name/id, role list, and interactive flag). This is diagnostic evidence,
-not proof that ACLs were bypassed or a write persisted. Scripted REST calls
+user name/id, role list, interactive flag, and current scope when ServiceNow
+reports it). This is diagnostic evidence, not proof that ACLs were bypassed or a
+write persisted. Visibility warnings for `read_access=false` tables are removed
+only when the observed scope matches the owning scope. Scripted REST calls
 report an observed identity only when the companion endpoint returns a
 `runtimeIdentity` object.
+
+The output protocol validates mailbox envelopes, detects missing/duplicate
+chunks, and distinguishes transport truncation from the display cap. Timing
+breakdown fields cover setup, polling, script body, output persistence, payload
+read, cleanup, and poll count; scheduler wait is labelled as an upper bound
+because it includes detection/network lag. On timeout now-mcp asks ServiceNow to
+delete the Run Once trigger before removing its mailbox, but cancellation is
+best-effort: `executionState: "unknown_after_timeout"` means a claimed script may
+already have run, so verify writes before retrying.
 
 **3. Reverse-engineer legacy config into source control.**
 `now-sdk transform --table <t>` to capture to Fluent → MCP reads to verify

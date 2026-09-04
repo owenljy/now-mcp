@@ -62,14 +62,22 @@ function makeStubClient() {
   };
 }
 
-function makeManager(client, { name = 'dev', url = 'https://dev.service-now.com' } = {}) {
+function makeManager(
+  client,
+  { name = 'dev', url = 'https://dev.service-now.com', auth, revision = 0 } = {},
+) {
   return {
     getClient: () => client,
-    getConfig: () => ({ name, url, readOnly: false }),
+    getConfig: () => ({ name, url, readOnly: false, auth }),
     resolveInstance: (instance) => {
       const resolvedName = instance || name;
-      return { name: resolvedName, config: { name: resolvedName, url, readOnly: false }, client };
+      return {
+        name: resolvedName,
+        config: { name: resolvedName, url, readOnly: false, auth },
+        client,
+      };
     },
+    getConfigRevision: () => revision,
   };
 }
 
@@ -424,6 +432,55 @@ test('disk cache identity includes URL when the same profile name is repointed',
   assert.equal(second.state.dictionaryCalls, 1, 'repointed profile must not consume old disk cache');
 });
 
+test('disk cache identity includes the auth principal but never needs the secret', async () => {
+  const first = makeStubClient();
+  const shared = { name: 'principal-cache', url: 'https://same.service-now.com' };
+  const svc1 = new SchemaService(
+    makeManager(first, {
+      ...shared,
+      auth: { type: 'basic', username: 'first.user', password: 'secret-one' },
+    }),
+  );
+  await svc1.getTableSchema('incident');
+
+  const second = makeStubClient();
+  const svc2 = new SchemaService(
+    makeManager(second, {
+      ...shared,
+      auth: { type: 'basic', username: 'second.user', password: 'secret-two' },
+    }),
+  );
+  await svc2.getTableSchema('incident');
+
+  assert.equal(second.state.dictionaryCalls, 1, 'a different principal must not consume old schema data');
+  assert.doesNotMatch(svc2.getCacheStats().keys.join(' '), /secret-one|secret-two/);
+});
+
+test('a config revision invalidates in-memory and disk schema cache entries', async () => {
+  const client = makeStubClient();
+  let revision = 0;
+  const config = {
+    name: 'revision-cache',
+    url: 'https://revision.service-now.com',
+    auth: { type: 'basic', username: 'api.user', password: 'secret' },
+  };
+  const manager = {
+    resolveInstance() {
+      return { name: config.name, config, client };
+    },
+    getConfigRevision() {
+      return revision;
+    },
+  };
+  const svc = new SchemaService(manager);
+
+  await svc.getTableSchema('incident');
+  revision += 1;
+  await svc.getTableSchema('incident');
+
+  assert.equal(client.state.dictionaryCalls, 2);
+});
+
 function makeWsAccessClient(wsAccessValue, extraRow = {}) {
   const state = { calls: 0 };
   return {
@@ -686,17 +743,17 @@ test('listTables omits scope for a global/OOB table (including the literal "glob
   assert.equal(tables[0].scope, undefined);
 });
 
-test('listTables reports the total match count and honors offset', async () => {
+test('listTables reports the total match count and fetches a stable candidate window', async () => {
   const client = makeListTablesClient(
     [{ name: 'incident', label: 'Incident', 'super_class.name': 'task', 'sys_scope.scope': 'global' }],
     417,
   );
   const svc = new SchemaService(makeManager(client));
 
-  const { totalMatching } = await svc.listTables('inc', 50, 'listtotal', undefined, 100);
-  assert.equal(totalMatching, 417);
-  assert.equal(client.state.params.sysparm_offset, 100);
-  assert.equal(client.state.params.sysparm_limit, 50);
+	const { totalMatching } = await svc.listTables('inc', 50, 'listtotal', undefined, 100);
+	assert.equal(totalMatching, 417);
+	assert.equal(client.state.params.sysparm_offset, 0);
+	assert.equal(client.state.params.sysparm_limit, 10_000);
 });
 
 test('listTables reports totalMatching as null when the instance omits the header', async () => {
@@ -708,7 +765,7 @@ test('listTables reports totalMatching as null when the instance omits the heade
   assert.equal(totalMatching, null);
 });
 
-test('listTables caches per offset, so page 2 is not served page 1', async () => {
+test('listTables reuses the stable candidate set across ranked pages', async () => {
   const client = makeListTablesClient([{ name: 'incident', label: 'Incident' }], 200);
   const svc = new SchemaService(makeManager(client));
 
@@ -716,8 +773,8 @@ test('listTables caches per offset, so page 2 is not served page 1', async () =>
   assert.equal(client.state.calls, 1);
   await svc.listTables('inc', 50, 'listpaged', undefined, 0);
   assert.equal(client.state.calls, 1, 'same page should be cached');
-  await svc.listTables('inc', 50, 'listpaged', undefined, 50);
-  assert.equal(client.state.calls, 2, 'a different offset is a different result set');
+	await svc.listTables('inc', 50, 'listpaged', undefined, 50);
+	assert.equal(client.state.calls, 1, 'ranking pages must share one stable candidate set');
 });
 
 /**

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractTableFieldRefs, extractReferencedTables, parseEncodedQueryFields, detectWriteOperations } from '../build/utils/script-analysis.js';
+import { extractTableFieldRefs, extractReferencedReadTables, extractReferencedTables, parseEncodedQueryFields, detectWriteOperations } from '../build/utils/script-analysis.js';
 
 function refsFor(script, table) {
   const r = extractTableFieldRefs(script).find((x) => x.table === table);
@@ -328,4 +328,19 @@ test('extractReferencedTables de-duplicates and covers GlideAggregate', () => {
     var c = new GlideAggregate('sys_user');
   `;
   assert.deepEqual(extractReferencedTables(script).sort(), ['incident', 'sys_user']);
+});
+
+test('extractReferencedReadTables excludes write-only records and includes actual reads', () => {
+  const script = `
+    var created = new GlideRecord('x_acme_widget');
+    created.initialize();
+    created.setValue('name', 'new');
+    created.insert();
+    var queried = new GlideRecord('incident');
+    queried.addActiveQuery();
+    queried.query();
+    while (queried.next()) { gs.info(queried.number); }
+  `;
+
+  assert.deepEqual(extractReferencedReadTables(script), ['incident']);
 });

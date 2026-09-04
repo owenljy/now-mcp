@@ -10,21 +10,19 @@ import { toolError } from '../utils/error-handler.js';
 import { logger } from '../utils/logger.js';
 import {
 	detectWriteOperations,
-	extractReferencedTables,
+	extractReferencedReadTables,
 	extractTableFieldRefs,
 } from '../utils/script-analysis.js';
 import { toolResult, toolText } from '../utils/tool-response.js';
 import { recordTransportSample } from '../utils/transport-health.js';
 
-/**
- * Output guardrail. The sys_trigger execution path incidentally caps output at
- * ~3900 chars (sys_properties.value column width), but the Scripted REST "fast
- * path" (config.scriptApiPath) returns whatever the instance sends back with NO
- * cap at all — a script that logs a row per record in a loop can produce output
- * far beyond the MCP host's own per-call token ceiling. Apply one explicit cap
- * here so both paths behave the same regardless of which one served the call.
- */
+/** Output guardrail shared by both transports. The sys_trigger mailbox carries
+ * more than this in bounded chunks, while Scripted REST can return an arbitrary
+ * body; this is the user-facing render limit for either route. */
 const MAX_OUTPUT_CHARS = 8000;
+/** Keep resultMode=json from bypassing the plain-output render guardrail by
+ * returning an arbitrarily large parsed object in applicationResult. */
+const MAX_APPLICATION_RESULT_CHARS = 20_000;
 
 /**
  * Scheduler wait, in ms, above which the sys_trigger transport is worth
@@ -39,7 +37,7 @@ export const EXECUTE_BACKGROUND_SCRIPT_TOOL = {
 	title: 'Execute background script',
 	description: `What: Run server-side JavaScript in ServiceNow using the instance's configured execution transport: scriptApiPath when set, otherwise a temporary sys_trigger, then return logged output.
 When to use: Only for logic the dedicated Table/Stats tools can't express. Prefer query_records / aggregate_records for reads and the create/update/delete record tools for CRUD; call sn_delete_records FIRST for known-record deletion rather than GlideRecord.deleteRecord().
-Preconditions: A WRITE-ENABLED instance. For scriptApiPath, the Scripted REST resource must be installed, active, and executable by the integration user; without it, that user must create/read/delete temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
+Preconditions: A WRITE-ENABLED instance. scriptApiPath must be active and executable; otherwise the user needs create/read/delete access to temporary sys_properties/sys_trigger records. Timeout default 60s, max 2m.
 
 WARNING: executes arbitrary server-side code; all executions are logged. allowWrites is an MCP safety acknowledgement only — it grants no roles and bypasses no ACLs. Runtime identity comes from the configured endpoint or scheduled-job context, and observedIdentity does not imply ACL bypass.
 
@@ -49,7 +47,7 @@ Runtime (ServiceNow Rhino, NOT Node): call log(...) for output (gs.log/info/prin
 
 visibilityWarnings lists referenced tables restricted to their owning scope by read_access. On those, a zero-row result is NOT evidence the table is empty.
 
-timings splits the sys_trigger duration into observedSchedulerWaitMs (queue), scriptDurationMs, cleanup and pollCount; a long total is usually queue, so configure scriptApiPath rather than trimming the script. queueDelayMs is deprecated (it reports the whole duration).`,
+timings splits the sys_trigger duration into setup, polling, script, output persistence, payload read, cleanup and pollCount. observedSchedulerWaitUpperBoundMs includes polling detection/network lag, so treat it as an upper bound. queueDelayMs is deprecated (it reports the whole duration).`,
 	inputSchema: ExecuteBackgroundScriptSchema,
 	outputSchema: ExecuteScriptOutputSchema,
 };
@@ -141,10 +139,16 @@ export function createExecuteBackgroundScriptTool(
 				// Visibility warnings ride alongside: both walk the same extracted table
 				// refs and both are advisory, so they share one pre-flight step rather
 				// than serializing two round-trip batches.
-				const [schemaCheck, visibilityWarnings] = schemaService
+				const transportStatus = scriptService.getExecutionTransportStatus(validated.instance);
+				const [schemaCheck, initialVisibilityWarnings] = schemaService
 					? await Promise.all([
 							runSchemaPreflight(schemaService, validated.script, validated.instance),
-							collectVisibilityWarnings(schemaService, validated.script, validated.instance),
+							collectVisibilityWarnings(
+								schemaService,
+								validated.script,
+								transportStatus.transport,
+								validated.instance,
+							),
 						])
 					: [undefined, undefined];
 
@@ -155,6 +159,19 @@ export function createExecuteBackgroundScriptTool(
 					validated.instance,
 					validated.mirrorOutputToSystemLog,
 				);
+				const observedScope = result.runtimeIdentity?.scopeName;
+				const refinedVisibilityWarnings = initialVisibilityWarnings
+					?.filter(
+						(warning) =>
+							!observedScope || !warning.owningScope || observedScope !== warning.owningScope,
+					)
+					.map((warning) => ({
+						...warning,
+						...(observedScope ? { executionScope: observedScope } : {}),
+					}));
+				const visibilityWarnings = refinedVisibilityWarnings?.length
+					? refinedVisibilityWarnings
+					: undefined;
 
 				let output = result.output ?? null;
 				// Two distinct causes, kept distinct: the transport itself may have
@@ -184,12 +201,18 @@ export function createExecuteBackgroundScriptTool(
 				let resultContractError: string | undefined;
 				if (validated.resultMode === 'json' && result.success) {
 					try {
-						const lastLine = String(result.output ?? '')
-							.trim()
-							.split(/\r?\n/)
-							.filter(Boolean)
-							.at(-1);
+						const trimmedOutput = String(result.output ?? '').trim();
+						const lastBreak = Math.max(
+							trimmedOutput.lastIndexOf('\n'),
+							trimmedOutput.lastIndexOf('\r'),
+						);
+						const lastLine = trimmedOutput.slice(lastBreak + 1).trim();
 						if (!lastLine) throw new Error('script produced no output');
+						if (lastLine.length > MAX_APPLICATION_RESULT_CHARS) {
+							throw new Error(
+								`final JSON line is ${lastLine.length} characters; maximum is ${MAX_APPLICATION_RESULT_CHARS}`,
+							);
+						}
 						applicationResult = JSON.parse(lastLine);
 						if (applicationResult && typeof applicationResult === 'object') {
 							const contract = applicationResult as { success?: unknown; ok?: unknown };
@@ -207,7 +230,7 @@ export function createExecuteBackgroundScriptTool(
 				const overallSuccess =
 					result.success && applicationSuccess !== false && !resultContractError;
 
-				const instanceKey = validated.instance || 'default';
+				const instanceKey = result.instanceName ?? validated.instance ?? 'default';
 
 				// Feed the per-instance transport history so sn_connection_status can
 				// report scheduler health from evidence instead of the operator having
@@ -233,9 +256,9 @@ export function createExecuteBackgroundScriptTool(
 					typeof schedulerWait === 'number' &&
 					schedulerWait > SLOW_SCHEDULER_WAIT_MS &&
 					!reportedSlowTransport.has(instanceKey)
-						? `This instance's scheduler took ~${Math.round(schedulerWait / 1000)}s to pick up the ` +
-							`Run Once trigger; the script itself ran in ${result.timings?.scriptDurationMs ?? '?'}ms. ` +
-							`That wait is queue time, not script time, so simplifying the script will not help. ` +
+						? `This instance's scheduler/polling wait was at most ~${Math.round(schedulerWait / 1000)}s before completion was observed; ` +
+							`the script itself ran in ${result.timings?.scriptDurationMs ?? '?'}ms. ` +
+							`The dominant delay is scheduler pickup/poll detection, not script work, so simplifying the script will not help. ` +
 							`Configure scriptApiPath (a Scripted REST resource) to execute synchronously and skip ` +
 							`the scheduler entirely.`
 						: undefined;
@@ -273,6 +296,7 @@ export function createExecuteBackgroundScriptTool(
 						: {}),
 					executionPath: result.executionPath,
 					outcome: result.outcome,
+					...(result.executionState ? { executionState: result.executionState } : {}),
 					...(result.runtimeIdentity
 						? { runtimeContext: { observedIdentity: result.runtimeIdentity } }
 						: {}),
@@ -346,6 +370,7 @@ interface VisibilityWarning {
 	executionScope?: string;
 	emptyResultIsConclusive: boolean;
 	recommendedTransport?: string;
+	owningScope?: string;
 }
 
 /**
@@ -370,41 +395,50 @@ interface VisibilityWarning {
 async function collectVisibilityWarnings(
 	schemaService: SchemaService,
 	script: string,
+	transport: 'scripted_rest' | 'sys_trigger',
 	instance?: string,
 ): Promise<VisibilityWarning[] | undefined> {
 	try {
-		// extractReferencedTables, not extractTableFieldRefs: a table that names no
+		// extractReferencedReadTables, not extractTableFieldRefs: a table that names no
 		// column is dropped by the field-keyed extractor, and the script that
 		// triggered this whole feature — `gr.query(); gr.getRowCount()` — is
 		// exactly that shape.
-		const tables = extractReferencedTables(script);
+		const tables = extractReferencedReadTables(script);
 		if (tables.length === 0) return undefined;
 
-		const warnings: VisibilityWarning[] = [];
-		for (const table of tables) {
-			const profile = await schemaService.getTableAccessProfile(table, instance);
-			// Unknown/unreadable profile: stay silent. A warning on every table whose
-			// metadata we merely failed to read would be noise, and the schema
-			// preflight already reports unresolvable tables.
-			if (!profile?.exists || profile.readAccess !== false) continue;
+		const warnings = (
+			await Promise.all(
+				tables.map(async (table): Promise<VisibilityWarning | undefined> => {
+					const profile = await schemaService.getTableAccessProfile(table, instance);
+					// Unknown/unreadable profile: stay silent. A warning on every table whose
+					// metadata we merely failed to read would be noise, and the schema
+					// preflight already reports unresolvable tables.
+					if (!profile?.exists || profile.readAccess !== false) return undefined;
 
-			const scope = profile.owningScope?.name;
-			warnings.push({
-				table,
-				reason:
-					`sys_db_object.read_access is off for ${table}, so it is readable only from its owning ` +
-					`application scope${scope ? ` (${scope})` : ''}. This script runs in global scope, so it reads ` +
-					`ZERO rows and still reports success — no exception, isValid() and canRead() both true. ` +
-					`Measured on a live instance: sys_trigger has no scope field, and no GlideRecord variant ` +
-					`(GlideRecordSecure, GlideAggregate, get() by sys_id) escapes this.`,
-				emptyResultIsConclusive: false,
-				// When REST is open the Table API is the cheapest correct route. When it
-				// is not, now-sdk query is the one verified to work: measured against
-				// ws_access=0/read_access=0 tables that 403 the Table API and read empty
-				// here, it returned real rows.
-				recommendedTransport: profile.wsAccess === true ? 'table-api' : 'now-sdk query',
-			});
-		}
+					const scope = profile.owningScope?.name;
+					const scopeClaim =
+						transport === 'sys_trigger'
+							? 'The scheduled execution scope is checked after the trigger reports its runtime identity'
+							: 'The configured Scripted REST endpoint has not yet reported its execution scope';
+					return {
+						table,
+						reason:
+							`sys_db_object.read_access is off for ${table}, so it is readable only from its owning ` +
+							`application scope${scope ? ` (${scope})` : ''}. ${scopeClaim}; outside the owning scope a read can return ` +
+							`ZERO rows and still report success — no exception, isValid() and canRead() both true. ` +
+							`Measured on a live instance: sys_trigger has no scope field, and no GlideRecord variant ` +
+							`(GlideRecordSecure, GlideAggregate, get() by sys_id) escapes this.`,
+						emptyResultIsConclusive: false,
+						...(scope ? { owningScope: scope } : {}),
+						// When REST is open the Table API is the cheapest correct route. When it
+						// is not, now-sdk query is the one verified to work: measured against
+						// ws_access=0/read_access=0 tables that 403 the Table API and read empty
+						// here, it returned real rows.
+						recommendedTransport: profile.wsAccess === true ? 'table-api' : 'now-sdk query',
+					};
+				}),
+			)
+		).filter((warning): warning is VisibilityWarning => warning !== undefined);
 		return warnings.length > 0 ? warnings : undefined;
 	} catch (error) {
 		// Advisory infrastructure: never let it interfere with execution.
@@ -428,23 +462,27 @@ async function runSchemaPreflight(
 		const refs = extractTableFieldRefs(script);
 		if (refs.length === 0) return undefined;
 
-		const findings: SchemaPreflightFinding[] = [];
-		for (const { table, fields } of refs) {
-			const result = await schemaService.validateFields(table, fields, instance);
-			if (result === null) {
-				// Couldn't resolve the table's schema — typo'd table name or no read
-				// access. A close real-table suggestion disambiguates the two.
-				const suggestion = await schemaService.suggestTableName(table, instance);
-				findings.push({
-					table,
-					note: suggestion
-						? `Table '${table}' not resolved — did you mean '${suggestion}'? (or no read access)`
-						: 'Schema not resolved (unknown table or no read access) — field names not checked.',
-				});
-			} else if (result.unknown.length > 0) {
-				findings.push({ table, unknownFields: result.unknown });
-			}
-		}
+		const findings = (
+			await Promise.all(
+				refs.map(async ({ table, fields }): Promise<SchemaPreflightFinding | undefined> => {
+					const result = await schemaService.validateFields(table, fields, instance);
+					if (result === null) {
+						// Couldn't resolve the table's schema — typo'd table name or no read
+						// access. A close real-table suggestion disambiguates the two.
+						const suggestion = await schemaService.suggestTableName(table, instance);
+						return {
+							table,
+							note: suggestion
+								? `Table '${table}' not resolved — did you mean '${suggestion}'? (or no read access)`
+								: 'Schema not resolved (unknown table or no read access) — field names not checked.',
+						};
+					} else if (result.unknown.length > 0) {
+						return { table, unknownFields: result.unknown };
+					}
+					return undefined;
+				}),
+			)
+		).filter((finding): finding is SchemaPreflightFinding => finding !== undefined);
 		return findings.length > 0 ? findings : undefined;
 	} catch (error) {
 		// Pre-flight is best-effort; never let it interfere with execution.
