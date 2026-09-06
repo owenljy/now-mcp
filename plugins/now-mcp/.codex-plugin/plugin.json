@@ -1,6 +1,6 @@
 {
   "name": "now-mcp",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "description": "Fluent-native ServiceNow MCP server with runtime data, schema, script, attachment, and diagnostic tools.",
   "author": {
     "name": "Owen Liang"

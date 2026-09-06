@@ -8,9 +8,14 @@
  * (catching the classic "deployed to dev, queried prod" mistake).
  */
 
-import { spawnSync } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
+import { delimiter, join } from 'node:path';
+import { abortable } from './deadline.js';
+import { type ProcessResult, runProcess } from './subprocess.js';
 
 export interface NowSdkQueryOptions {
+	authProfile?: string;
+	signal?: AbortSignal;
 	query?: string;
 	limit?: number;
 	offset?: number;
@@ -212,21 +217,12 @@ export function computeAlignment(
 const DEFAULT_TIMEOUT_MS = 5_000;
 const VERSION_TIMEOUT_MS = 2_000;
 
-function runNowSdk(
+async function runNowSdk(
 	args: string[],
 	timeoutMs: number = DEFAULT_TIMEOUT_MS,
-): { ok: boolean; stdout: string; stderr: string } {
-	try {
-		const res = spawnSync('now-sdk', args, { encoding: 'utf-8', timeout: timeoutMs });
-		if (res.error) return { ok: false, stdout: '', stderr: String(res.error.message) };
-		return { ok: res.status === 0, stdout: res.stdout || '', stderr: res.stderr || '' };
-	} catch (error) {
-		return {
-			ok: false,
-			stdout: '',
-			stderr: error instanceof Error ? error.message : String(error),
-		};
-	}
+	signal?: AbortSignal,
+): Promise<ProcessResult> {
+	return runProcess('now-sdk', args, { timeoutMs, signal });
 }
 
 /**
@@ -265,11 +261,11 @@ export function parseNowSdkQueryOutput(output: string): Omit<NowSdkQuerySuccess,
  * Execute the CLI's independent, read-only query path with an explicit auth
  * alias. Arguments are passed directly to spawnSync (never through a shell).
  */
-export function runNowSdkQuery(
+export async function runNowSdkQuery(
 	profile: string,
 	table: string,
 	options: NowSdkQueryOptions = {},
-): NowSdkQueryResult {
+): Promise<NowSdkQueryResult> {
 	const requestTimeoutMs = 30_000;
 	const args = [
 		'query',
@@ -294,8 +290,17 @@ export function runNowSdkQuery(
 	if (options.excludeReferenceLink === false) args.push('--no-exclude-reference-link');
 
 	// Give the process a small shutdown margin beyond now-sdk's own request bound.
-	const result = runNowSdk(args, requestTimeoutMs + 5_000);
-	if (!result.ok) return { ok: false, reason: 'now-sdk query exited unsuccessfully' };
+	const result = await runNowSdk(args, requestTimeoutMs + 5_000, options.signal);
+	if (!result.ok) {
+		// Classify, never echo CLI output: it can contain record data or auth material.
+		const diagnostic = `${result.stdout}\n${result.stderr}`;
+		const reason = /user name or password invalid|authentication failed|\b401\b/i.test(diagnostic)
+			? 'selected now-sdk profile authentication failed; update its credentials or explicitly bind another profile'
+			: /access denied|not authorized|\b403\b/i.test(diagnostic)
+				? 'selected now-sdk profile was denied access'
+				: `now-sdk query failed (${result.reason ?? 'exit_failed'})`;
+		return { ok: false, reason };
+	}
 	const parsed = parseNowSdkQueryOutput(result.stdout);
 	if (!parsed) return { ok: false, reason: 'now-sdk query returned an invalid JSON envelope' };
 	return { ...parsed, profile };
@@ -306,49 +311,85 @@ export function runNowSdkQuery(
  * as the selected MCP instance. This prevents a recovery path from silently
  * reading a different environment.
  */
-export function queryNowSdkWithAlignedProfile(
+export async function queryNowSdkWithAlignedProfile(
 	instanceUrl: string,
 	table: string,
 	options: NowSdkQueryOptions = {},
-): NowSdkQueryResult {
-	const version = parseSemVer(getNowSdkVersion());
+): Promise<NowSdkQueryResult> {
+	if (options.signal?.aborted) return { ok: false, reason: 'now-sdk query cancelled' };
+	const version = parseSemVer(await abortable(getNowSdkVersion(), options.signal));
 	if (!resolveFeatures(version).query) {
 		return { ok: false, reason: 'now-sdk query is unavailable (requires now-sdk >=4.8.0)' };
 	}
 	if (!isAuthListFormatVerified(version)) {
 		return { ok: false, reason: 'installed now-sdk auth-list format is not verified' };
 	}
-	const target = normalizeHost(instanceUrl);
-	const profile = listNowSdkProfiles().find(
-		(candidate) => normalizeHost(candidate.host) === target,
+	const selection = selectAlignedProfile(
+		await abortable(listNowSdkProfiles(), options.signal),
+		instanceUrl,
+		options.authProfile,
 	);
-	if (!profile) {
-		return { ok: false, reason: 'no now-sdk auth profile matches the selected MCP instance' };
+	if (!selection.ok) return selection;
+	return runNowSdkQuery(selection.profile.alias, table, options);
+}
+
+export function selectAlignedProfile(
+	profiles: AuthProfile[],
+	instanceUrl: string,
+	alias?: string,
+): { ok: true; profile: AuthProfile } | NowSdkQueryFailure {
+	const matched = profiles.filter((p) => normalizeHost(p.host) === normalizeHost(instanceUrl));
+	if (alias) {
+		const profile = matched.find((p) => p.alias === alias);
+		return profile
+			? { ok: true, profile }
+			: {
+					ok: false,
+					reason:
+						'configured nowSdkProfile is missing or does not match the selected instance host',
+				};
 	}
-	return runNowSdkQuery(profile.alias, table, options);
+	if (matched.length === 1) return { ok: true, profile: matched[0] };
+	return {
+		ok: false,
+		reason: matched.length
+			? 'multiple now-sdk profiles match this host; set nowSdkProfile explicitly in the instance configuration'
+			: 'no now-sdk auth profile matches the selected MCP instance',
+	};
 }
 
 // Probe `now-sdk --version` once per process — presence and version don't change
 // mid-session. This single cached probe answers BOTH "is it available?" and
 // "what version?", so we never spawn --version more than once (it was being run
 // by isNowSdkAvailable AND getNowSdkVersion, sometimes several times per call).
-let versionProbe: { available: boolean; version: string | null } | null = null;
+let versionProbe: Promise<{ available: boolean; version: string | null }> | null = null;
 
-function probeVersion(): { available: boolean; version: string | null } {
+function probeVersion(): Promise<{ available: boolean; version: string | null }> {
 	if (versionProbe !== null) return versionProbe;
-	const res = runNowSdk(['--version'], VERSION_TIMEOUT_MS);
-	const version = res.ok ? res.stdout.trim().split('\n').pop()?.trim() || null : null;
-	versionProbe = { available: res.ok, version };
+	versionProbe = runNowSdk(['--version'], VERSION_TIMEOUT_MS).then((res) => ({
+		available: res.ok,
+		version: res.ok ? res.stdout.trim().split('\n').pop()?.trim() || null : null,
+	}));
 	return versionProbe;
 }
 
 /** True if the now-sdk CLI is available on PATH (cached probe). */
 export function isNowSdkAvailable(): boolean {
-	return probeVersion().available;
+	return (process.env.PATH ?? '').split(delimiter).some((directory) => {
+		try {
+			accessSync(
+				join(directory, process.platform === 'win32' ? 'now-sdk.cmd' : 'now-sdk'),
+				constants.X_OK,
+			);
+			return true;
+		} catch {
+			return false;
+		}
+	});
 }
 
-export function getNowSdkVersion(): string | null {
-	return probeVersion().version;
+export async function getNowSdkVersion(): Promise<string | null> {
+	return (await probeVersion()).version;
 }
 
 // `now-sdk auth --list` spawns a JVM-backed CLI that costs ~2.8s per call, and
@@ -357,17 +398,25 @@ export function getNowSdkVersion(): string | null {
 // session `now-sdk auth --use/--add` is still picked up within a minute.
 const PROFILE_CACHE_TTL_MS = 60_000;
 let profileCache: { at: number; profiles: AuthProfile[] } | null = null;
+let profileProbe: Promise<AuthProfile[]> | null = null;
 
-export function listNowSdkProfiles(): AuthProfile[] {
+export async function listNowSdkProfiles(): Promise<AuthProfile[]> {
 	const now = Date.now();
 	if (profileCache && now - profileCache.at < PROFILE_CACHE_TTL_MS) {
 		return profileCache.profiles;
 	}
-	const res = runNowSdk(['auth', '--list']);
-	if (!res.ok) return [];
-	const profiles = parseAuthList(res.stdout);
-	profileCache = { at: now, profiles };
-	return profiles;
+	if (!profileProbe)
+		profileProbe = runNowSdk(['auth', '--list'])
+			.then((res) => {
+				if (!res.ok) return [];
+				const profiles = parseAuthList(res.stdout);
+				profileCache = { at: Date.now(), profiles };
+				return profiles;
+			})
+			.finally(() => {
+				profileProbe = null;
+			});
+	return profileProbe;
 }
 
 /**
@@ -388,8 +437,8 @@ export function pickDefaultProfile(profiles: AuthProfile[], alias?: string): Aut
 	return profiles.length === 1 ? profiles[0] : null;
 }
 
-export function resolveProfile(alias?: string): AuthProfile | null {
-	return pickDefaultProfile(listNowSdkProfiles(), alias);
+export async function resolveProfile(alias?: string): Promise<AuthProfile | null> {
+	return pickDefaultProfile(await listNowSdkProfiles(), alias);
 }
 
 /**
@@ -467,11 +516,11 @@ export function deriveDefaultAlignment(
  * Live default-alignment check: probes now-sdk for its default profile and
  * compares against the MCP's current default instance.
  */
-export function getDefaultAlignment(
+export async function getDefaultAlignment(
 	configured: Array<{ name: string; url: string }>,
 	mcpDefaultInstance: string,
-): DefaultAlignment {
+): Promise<DefaultAlignment> {
 	const available = isNowSdkAvailable();
-	const profile = available ? resolveProfile() : null;
+	const profile = available ? await resolveProfile() : null;
 	return deriveDefaultAlignment(profile, configured, mcpDefaultInstance, available);
 }

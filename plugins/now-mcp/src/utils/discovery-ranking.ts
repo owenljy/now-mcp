@@ -55,6 +55,8 @@ const SATELLITE_MARKERS = [
 const SATELLITE_PENALTY = 200;
 
 export interface RankableItem {
+	/** Owner table name when name is a field; structural penalties belong to the table. */
+	structuralName?: string;
 	/** Table name or column name — the machine identifier. */
 	name: string;
 	/** Human label, when the row has one. */
@@ -110,7 +112,7 @@ export function scoreItem(item: RankableItem, terms: string[]): number {
 	}
 
 	if (isCoreScope(item.scope)) score += SCORE.coreScope;
-	if (isSatellite(name)) score -= SATELLITE_PENALTY;
+	if (isSatellite((item.structuralName ?? name).toLowerCase())) score -= SATELLITE_PENALTY;
 
 	return score;
 }
@@ -132,6 +134,10 @@ export function rankItems<T extends RankableItem>(items: T[], terms: string[]): 
 			}
 			const nameOrder = a.item.name.localeCompare(b.item.name);
 			if (nameOrder !== 0) return nameOrder;
+			if (a.item.structuralName && b.item.structuralName) {
+				const ownerLength = a.item.structuralName.length - b.item.structuralName.length;
+				if (ownerLength !== 0) return ownerLength;
+			}
 			return (a.item.stableKey ?? '').localeCompare(b.item.stableKey ?? '');
 		});
 }

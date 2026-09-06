@@ -76,6 +76,8 @@ export interface InstanceConfig {
 	 * active on that specific instance. A failure does not silently fall back.
 	 */
 	scriptApiPath?: string;
+	/** Explicit SDK identity for query fallback; must target this instance's host. */
+	nowSdkProfile?: string;
 }
 
 /**

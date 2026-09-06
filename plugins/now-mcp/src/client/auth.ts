@@ -109,8 +109,11 @@ async function requestToken(
 	config: OAuthConfig,
 	params: URLSearchParams,
 	cacheKey: string,
+	signal?: AbortSignal,
 ): Promise<string> {
+	signal?.throwIfAborted();
 	const response = await fetch(config.tokenUrl, {
+		signal,
 		method: 'POST',
 		headers: {
 			'Content-Type': 'application/x-www-form-urlencoded',
@@ -161,7 +164,8 @@ async function requestToken(
  * @param config OAuth configuration
  * @returns Access token
  */
-export async function getOAuthToken(config: OAuthConfig): Promise<string> {
+export async function getOAuthToken(config: OAuthConfig, signal?: AbortSignal): Promise<string> {
+	signal?.throwIfAborted();
 	// Validate config
 	if (!config.clientId || !config.clientSecret || !config.tokenUrl) {
 		throw new ValidationError(
@@ -195,8 +199,9 @@ export async function getOAuthToken(config: OAuthConfig): Promise<string> {
 					client_secret: config.clientSecret,
 				});
 				if (config.scope) refreshParams.append('scope', config.scope);
-				return await requestToken(config, refreshParams, cacheKey);
+				return await requestToken(config, refreshParams, cacheKey, signal);
 			} catch {
+				signal?.throwIfAborted();
 				// Refresh failed (expired/revoked) — drop it and fall through to a
 				// fresh password exchange below.
 				tokenCache.delete(cacheKey);
@@ -218,8 +223,9 @@ export async function getOAuthToken(config: OAuthConfig): Promise<string> {
 			params.append('scope', config.scope);
 		}
 
-		return await requestToken(config, params, cacheKey);
+		return await requestToken(config, params, cacheKey, signal);
 	} catch (error) {
+		signal?.throwIfAborted();
 		if (error instanceof Error) {
 			throw new Error(`Failed to obtain OAuth token: ${error.message}`);
 		}

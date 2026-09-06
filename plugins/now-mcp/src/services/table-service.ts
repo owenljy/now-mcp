@@ -16,6 +16,7 @@ import type {
 import { summarizeRecordPayload } from '../utils/log-safety.js';
 import { logger } from '../utils/logger.js';
 import { queryNowSdkWithAlignedProfile } from '../utils/now-sdk-cli.js';
+import { getOperationContext } from '../utils/operation-context.js';
 import { transactionScopeParam } from '../utils/transaction-scope.js';
 import {
 	sanitizeQuery,
@@ -90,6 +91,8 @@ export class TableService {
 		const resolved = this.instanceManager.resolveInstance(instance);
 		const client = resolved.client;
 		const endpoint = API_ENDPOINTS.TABLE_RECORD(tableName);
+		const signal = getOperationContext()?.signal;
+		signal?.throwIfAborted();
 
 		// Build query parameters
 		const params: Record<string, unknown> = {};
@@ -121,7 +124,11 @@ export class TableService {
 		logger.debug(`Querying table: ${tableName}`, { params, instance: instance || 'default' });
 
 		try {
-			const { data, headers } = await client.getWithHeaders<TableAPIResponse<T>>(endpoint, params);
+			const { data, headers } = await client.getWithHeaders<TableAPIResponse<T>>(
+				endpoint,
+				params,
+				signal,
+			);
 			const totalCount = parseTotalCount(headers['x-total-count']);
 
 			logger.info(`Retrieved ${data.result.length} records from ${tableName}`, {
@@ -160,7 +167,9 @@ export class TableService {
 				table: tableName,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			const fallback = this.nowSdkQuery(resolved.config.url, tableName, {
+			const fallback = await this.nowSdkQuery(resolved.config.url, tableName, {
+				signal,
+				authProfile: resolved.config.nowSdkProfile,
 				query: options.query ? sanitizeQuery(options.query) : undefined,
 				limit: options.limit,
 				offset: options.offset,
@@ -169,6 +178,7 @@ export class TableService {
 				excludeReferenceLink: options.excludeReferenceLink,
 			});
 			if (!fallback.ok) {
+				if (error instanceof ServiceNowError) error.fallbackFailure = { reason: fallback.reason };
 				logger.warn('now-sdk query fallback was unavailable', {
 					instance: resolved.name,
 					table: tableName,

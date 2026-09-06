@@ -3,7 +3,8 @@
  */
 
 import type { InstanceManager } from '../client/instance-manager.js';
-import { ServiceNowError } from '../types/errors.js';
+import type { ServiceNowClient } from '../client/servicenow-client.js';
+import { MutationOutcomeUncertainError, ServiceNowError } from '../types/errors.js';
 import { logger } from '../utils/logger.js';
 import {
 	chunkWriterSource,
@@ -14,6 +15,7 @@ import {
 	validateMailboxEnvelope,
 } from '../utils/mailbox-protocol.js';
 import { nextPollDelayMs } from '../utils/poll-schedule.js';
+import { rewriteScriptLogs } from '../utils/rewrite-script-logs.js';
 import { validateWriteAccess } from '../utils/validators.js';
 
 interface ScriptExecutionResult {
@@ -103,6 +105,11 @@ function phaseError(
 	remediation?: string,
 ): ServiceNowError {
 	const original = error instanceof ServiceNowError ? error : undefined;
+	if (
+		original?.code === 'MUTATION_OUTCOME_UNCERTAIN' ||
+		original?.code === 'REQUEST_DEADLINE_EXCEEDED'
+	)
+		return original;
 	const suffix = remediation ? ` ${remediation}` : '';
 	return new ServiceNowError(
 		`Background-script ${phase} failed: ${method} ${endpoint}: ${errorMessage(error)}.${suffix}`,
@@ -259,7 +266,7 @@ export class ScriptService {
 					sysparm_limit: MAX_CHUNKS,
 				},
 			);
-			return resp.result ?? [];
+			return Array.isArray(resp.result) ? resp.result : [];
 		} catch (error) {
 			// Returning [] lets reassembleChunks report every chunk as missing, which
 			// surfaces as an explicit incomplete-output error. Throwing here would
@@ -288,15 +295,17 @@ export class ScriptService {
 		parentSysId: string,
 		propKey: string,
 		expectedChunks: number,
-	): Promise<void> {
+	): Promise<boolean> {
 		const endpoint = '/api/now/table/sys_properties';
+		let complete = true;
 		try {
 			await client.delete(`${endpoint}/${parentSysId}`);
 		} catch (error) {
+			if (!(error instanceof ServiceNowError && error.statusCode === 404)) complete = false;
 			logger.warn('Failed to clean up sys_properties mailbox parent', { propKey, error });
 		}
 
-		if (expectedChunks <= 0) return;
+		if (expectedChunks <= 0) return complete;
 		try {
 			// Re-query instead of assuming indices 0..n-1: a partial write or a
 			// timeout means the set on the instance may not match what the envelope
@@ -306,23 +315,69 @@ export class ScriptService {
 				sysparm_fields: 'sys_id',
 				sysparm_limit: MAX_CHUNKS,
 			});
-			for (const row of resp.result ?? []) {
-				if (!row.sys_id) continue;
-				try {
-					await client.delete(`${endpoint}/${row.sys_id}`);
-				} catch (error) {
-					logger.warn('Failed to clean up a background-script output chunk', {
-						propKey,
-						error,
-					});
+			const rows = resp.result ?? [];
+			let cursor = 0;
+			const worker = async () => {
+				while (cursor < rows.length) {
+					const row = rows[cursor++];
+					if (!row.sys_id) continue;
+					try {
+						await client.delete(`${endpoint}/${row.sys_id}`);
+					} catch (error) {
+						if (!(error instanceof ServiceNowError && error.statusCode === 404)) complete = false;
+						logger.warn('Failed to clean up a background-script output chunk', {
+							propKey,
+							error,
+						});
+					}
 				}
-			}
+			};
+			await Promise.all(Array.from({ length: Math.min(4, rows.length) }, worker));
 		} catch (error) {
+			complete = false;
 			logger.warn('Failed to enumerate background-script output chunks for cleanup', {
 				propKey,
 				error,
 			});
 		}
+		return complete;
+	}
+
+	/** Cancellation and cleanup have a separate 10s budget, never an unbounded tail. */
+	private async cleanupExecution(
+		raw: ServiceNowClient,
+		parent: string,
+		key: string,
+		triggerId: string | undefined,
+		triggerName: string,
+		cancel: boolean,
+		chunks: number,
+	): Promise<'complete' | 'incomplete'> {
+		const client = raw.withDeadline?.(Date.now() + 10_000) ?? raw;
+		let complete = true;
+		if (cancel) {
+			await this.cancelMailbox(client, parent, key);
+			if (triggerId) complete = await this.cleanupTrigger(client, triggerId, triggerName);
+			else {
+				// A POST can commit even when its response (and sys_id) is lost.
+				try {
+					const found = await client.get<{ result: Array<{ sys_id: string }> }>(
+						'/api/now/table/sys_trigger',
+						{
+							sysparm_query: `name=${triggerName}`,
+							sysparm_fields: 'sys_id',
+							sysparm_limit: 2,
+						},
+					);
+					for (const row of found.result ?? [])
+						if (!(await this.cleanupTrigger(client, row.sys_id, triggerName))) complete = false;
+				} catch {
+					complete = false;
+				}
+			}
+		}
+		const mailboxClean = await this.cleanupMailbox(client, parent, key, chunks);
+		return complete && mailboxClean ? 'complete' : 'incomplete';
 	}
 
 	/** Best-effort cancellation for a Run Once trigger that has not started yet. */
@@ -330,9 +385,10 @@ export class ScriptService {
 		client: { delete: (endpoint: string) => Promise<unknown> },
 		triggerSysId: string,
 		triggerName: string,
-	): Promise<void> {
+	): Promise<boolean> {
 		try {
 			await client.delete(`/api/now/table/sys_trigger/${triggerSysId}`);
+			return true;
 		} catch (error) {
 			// The scheduler normally deletes Run Once triggers itself. A 404 here can
 			// therefore mean it already claimed the job, which is exactly why timeout
@@ -341,6 +397,7 @@ export class ScriptService {
 				triggerName,
 				error: error instanceof Error ? error.message : String(error),
 			});
+			return error instanceof ServiceNowError && error.statusCode === 404;
 		}
 	}
 
@@ -389,6 +446,9 @@ export class ScriptService {
 		/** On timeout the scheduler may already have started the script; cancellation
 		 * is best-effort, so callers must not assume a mutation did not occur. */
 		executionState?: 'completed' | 'failed' | 'unknown_after_timeout';
+		outputStatus?: 'complete' | 'incomplete';
+		cleanupStatus?: 'complete' | 'incomplete';
+		cleanupRecords?: { mailboxName: string; triggerName: string };
 		instanceName?: string;
 		runtimeIdentity?: ScriptRuntimeIdentity;
 		outputTruncated?: boolean;
@@ -398,10 +458,13 @@ export class ScriptService {
 		timings?: ScriptTransportTimings;
 	}> {
 		validateWriteAccess(this.instanceManager, instance);
-		const client = this.instanceManager.getClient(instance);
+		const rawClient = this.instanceManager.getClient(instance);
 		const config = this.instanceManager.getConfig(instance);
 		const instanceName = config.name;
 		const startTime = Date.now();
+		const deadline = startTime + timeout;
+		const client = rawClient.withDeadline?.(deadline) ?? rawClient;
+		const rewrittenScript = config.scriptApiPath ? script : rewriteScriptLogs(script);
 
 		logger.info('Executing background script', {
 			scriptLength: script.length,
@@ -441,7 +504,11 @@ export class ScriptService {
 				logger.error('Background script failed via Scripted REST', { error, executionTime });
 				if (
 					error instanceof ServiceNowError &&
-					error.code === 'BACKGROUND_SCRIPT_INVALID_RESPONSE'
+					[
+						'BACKGROUND_SCRIPT_INVALID_RESPONSE',
+						'MUTATION_OUTCOME_UNCERTAIN',
+						'REQUEST_DEADLINE_EXCEEDED',
+					].includes(error.code ?? '')
 				) {
 					throw error;
 				}
@@ -454,7 +521,9 @@ export class ScriptService {
 						(endpointUnavailable
 							? 'The configured route is unavailable on this instance (missing, inactive, or its namespace/resource path does not match). '
 							: 'The configured route did not complete the request. ') +
-						'This endpoint/configuration failure occurred before the submitted script ran; allowWrites does not affect it or elevate the integration user. ' +
+						(endpointUnavailable
+							? 'This endpoint/configuration failure occurred before the submitted script ran; allowWrites does not affect it or elevate the integration user. '
+							: 'Execution could not be confirmed; verify side effects before retrying. ') +
 						'now-mcp will not silently switch transports. Verify/install/activate the resource and its execute ACL, or remove scriptApiPath to intentionally select sys_trigger and satisfy its sys_properties/sys_trigger prerequisites.',
 					statusCode,
 					error,
@@ -490,8 +559,31 @@ export class ScriptService {
 					value: JSON.stringify({ status: 'pending' }),
 					description: 'Temporary MCP background-script output buffer — safe to delete',
 					type: 'string',
+					ignore_cache: true,
 				});
 			} catch (error) {
+				// Reconcile only this execution's unique name when creation may have committed.
+				if (error instanceof MutationOutcomeUncertainError) {
+					const cleanup = rawClient.withDeadline?.(Date.now() + 10_000) ?? rawClient;
+					try {
+						const found = await cleanup.get<{ result: Array<{ sys_id: string }> }>(
+							mailboxEndpoint,
+							{
+								sysparm_query: `name=${propKey}`,
+								sysparm_fields: 'sys_id',
+								sysparm_limit: 2,
+							},
+						);
+						for (const row of found.result ?? [])
+							await cleanup.delete(`${mailboxEndpoint}/${row.sys_id}`);
+					} catch {
+						/* Preserve the uncertain outcome, with a reconciliation key. */
+					}
+					error.servicenowError = {
+						...(error.servicenowError as Record<string, unknown>),
+						temporaryRecordName: propKey,
+					};
+				}
 				throw phaseError(
 					'mailbox creation',
 					'POST',
@@ -523,10 +615,6 @@ export class ScriptService {
 			// the SOURCE before the tool's own 8000-char render cap could apply. The
 			// payload now goes to indexed chunk properties (mailbox-protocol.ts) and
 			// the parent carries only the status envelope and the chunk count.
-			const rewrittenScript = script
-				.replace(/\bgs\.log\s*\(/g, 'log(')
-				.replace(/\bgs\.info\s*\(/g, 'log(')
-				.replace(/\bgs\.print\s*\(/g, 'log(');
 
 			const wrappedScript = `
 	        (function() {
@@ -534,6 +622,7 @@ export class ScriptService {
 	          var __output = [];
 	          var __outputChars = 0;
 	          var __outputOriginalChars = 0;
+	          var __logCount = 0;
 			  var __runtimeIdentity = {};
 			  try { __runtimeIdentity.userName = String(gs.getUserName()).substring(0, 160); } catch (ignore) {}
 			  try { __runtimeIdentity.userId = String(gs.getUserID()).substring(0, 64); } catch (ignore) {}
@@ -543,7 +632,7 @@ export class ScriptService {
 			  // A timed-out caller deletes the parent. Do not start late work once its
 			  // cancellation marker is gone, and mark a claimed execution as running.
 			  var __lease = new GlideRecord('sys_properties');
-			  if (!__lease.get('name', __key)) { return; }
+			  if (!__lease.get('name', __key) || new Date().getTime() >= ${deadline}) { return; }
 			  try {
 			    var __leaseValue = JSON.parse(String(__lease.getValue('value') || '{}'));
 			    if (__leaseValue.status !== 'pending') { return; }
@@ -556,7 +645,7 @@ export class ScriptService {
 			  // lets a noisy script allocate an unbounded array/string on the instance.
 			  var log = function(msg) {
 			    var s = String(msg);
-			    var withSeparator = (__outputOriginalChars > 0 ? '\\n' : '') + s;
+			    var withSeparator = (__logCount++ > 0 ? '\\n' : '') + s;
 			    __outputOriginalChars += withSeparator.length;
 			    if (__outputChars < ${MAX_TOTAL_CHARS}) {
 			      var remaining = ${MAX_TOTAL_CHARS} - __outputChars;
@@ -598,6 +687,7 @@ export class ScriptService {
 			    var __persistElapsed = new Date().getTime() - __persistStarted;
 	            __finish({
               status: 'done', success: true, runtimeIdentity: __runtimeIdentity,
+              protocolVersion: 2, payloadChecksum: __w.checksum,
               chunkCount: __w.count,
               outputTruncated: __w.truncated,
               outputOriginalChars: __w.originalChars,
@@ -618,6 +708,7 @@ export class ScriptService {
 			    var __persistErrElapsed = new Date().getTime() - __persistErrStarted;
             __finish({
               status: 'done', success: false, runtimeIdentity: __runtimeIdentity,
+              protocolVersion: 2, payloadChecksum: __we.checksum,
               chunkCount: __we.count,
               outputTruncated: __we.truncated,
               outputOriginalChars: __we.originalChars,
@@ -644,15 +735,16 @@ export class ScriptService {
 				});
 				triggerSysId = triggerCreate?.result?.sys_id;
 			} catch (error) {
-				// The trigger was never created, so remove the mailbox immediately.
-				try {
-					await client.delete(`${mailboxEndpoint}/${propSysId}`);
-				} catch (cleanupError) {
-					logger.warn('Failed to clean up mailbox after trigger creation failure', {
-						propKey,
-						error: cleanupError,
-					});
-				}
+				// A definite failure needs mailbox cleanup; uncertain dispatch also needs name-based trigger reconciliation.
+				await this.cleanupExecution(
+					rawClient,
+					propSysId,
+					propKey,
+					triggerSysId,
+					triggerName,
+					error instanceof MutationOutcomeUncertainError,
+					MAX_CHUNKS,
+				);
 				throw phaseError(
 					'trigger creation',
 					'POST',
@@ -668,7 +760,6 @@ export class ScriptService {
 			// Step 3: Poll sys_properties until status=done or timeout, backing off as
 			// the wait grows. Measured scheduler latency has a ~31s median, so a flat
 			// 500ms interval spent ~60 requests per call reading an empty mailbox.
-			const deadline = startTime + timeout;
 			let envelope: MailboxEnvelope | null = null;
 			let pollCount = 0;
 
@@ -687,11 +778,18 @@ export class ScriptService {
 						sysparm_fields: 'value',
 					});
 				} catch (error) {
+					if (Date.now() >= deadline) break;
 					// Clean up everything, not just the parent: chunks may already have
 					// been written by a trigger that ran while polling was failing.
-					await this.cancelMailbox(client, propSysId, propKey);
-					if (triggerSysId) await this.cleanupTrigger(client, triggerSysId, triggerName);
-					await this.cleanupMailbox(client, propSysId, propKey, MAX_CHUNKS);
+					await this.cleanupExecution(
+						rawClient,
+						propSysId,
+						propKey,
+						triggerSysId,
+						triggerName,
+						true,
+						MAX_CHUNKS,
+					);
 					throw phaseError('mailbox polling', 'GET', pollEndpoint, error);
 				}
 
@@ -712,9 +810,15 @@ export class ScriptService {
 					}
 				} catch (error) {
 					if (error instanceof ServiceNowError) {
-						await this.cancelMailbox(client, propSysId, propKey);
-						if (triggerSysId) await this.cleanupTrigger(client, triggerSysId, triggerName);
-						await this.cleanupMailbox(client, propSysId, propKey, MAX_CHUNKS);
+						await this.cleanupExecution(
+							rawClient,
+							propSysId,
+							propKey,
+							triggerSysId,
+							triggerName,
+							true,
+							MAX_CHUNKS,
+						);
 						throw error;
 					}
 					// Not valid JSON yet — keep polling
@@ -724,10 +828,6 @@ export class ScriptService {
 			// Stop a not-yet-started trigger before removing the lease/mailbox it
 			// checks. If the scheduler already claimed it, side effects remain unknown,
 			// but the wrapper's second lease check prevents late orphan chunks.
-			if (!envelope) {
-				await this.cancelMailbox(client, propSysId, propKey);
-				if (triggerSysId) await this.cleanupTrigger(client, triggerSysId, triggerName);
-			}
 
 			// Step 4: Collect the payload, then clean up parent + chunks. Reading
 			// happens BEFORE cleanup for the obvious reason, and cleanup happens on
@@ -736,9 +836,9 @@ export class ScriptService {
 			let payload = '';
 			let reassemblyError: string | undefined;
 			const payloadReadStart = Date.now();
-			if (envelope && (envelope.chunkCount ?? 0) > 0) {
+			if (envelope && ((envelope.chunkCount ?? 0) > 0 || envelope.protocolVersion === 2)) {
 				const chunks = await this.readChunks(client, propKey, envelope.chunkCount ?? 0);
-				const reassembled = reassembleChunks(propKey, envelope.chunkCount ?? 0, chunks);
+				const reassembled = reassembleChunks(propKey, envelope.chunkCount ?? 0, chunks, envelope);
 				payload = reassembled.payload;
 				reassemblyError = reassembled.error;
 			} else if (envelope) {
@@ -757,7 +857,15 @@ export class ScriptService {
 			const chunksPossible =
 				!envelope || envelope.chunkWriteFailed === true || (envelope.chunkCount ?? 0) > 0;
 			const cleanupStart = Date.now();
-			await this.cleanupMailbox(client, propSysId, propKey, chunksPossible ? MAX_CHUNKS : 0);
+			const cleanupStatus = await this.cleanupExecution(
+				rawClient,
+				propSysId,
+				propKey,
+				triggerSysId,
+				triggerName,
+				!envelope,
+				chunksPossible ? MAX_CHUNKS : 0,
+			);
 			const cleanupDurationMs = Date.now() - cleanupStart;
 
 			const executionTime = Date.now() - startTime;
@@ -794,6 +902,10 @@ export class ScriptService {
 					executionPath: 'sys_trigger',
 					outcome: 'timed_out',
 					executionState: 'unknown_after_timeout',
+					cleanupStatus,
+					...(cleanupStatus === 'incomplete'
+						? { cleanupRecords: { mailboxName: propKey, triggerName } }
+						: {}),
 					instanceName,
 					timings,
 				};
@@ -822,7 +934,12 @@ export class ScriptService {
 					executionPath: 'sys_trigger',
 					outcome: 'script_failed',
 					runtimeIdentity: envelope.runtimeIdentity as ScriptRuntimeIdentity | undefined,
-					executionState: 'failed',
+					executionState: envelope.success ? 'completed' : 'failed',
+					outputStatus: 'incomplete',
+					cleanupStatus,
+					...(cleanupStatus === 'incomplete'
+						? { cleanupRecords: { mailboxName: propKey, triggerName } }
+						: {}),
 					instanceName,
 					timings,
 				};
@@ -843,7 +960,12 @@ export class ScriptService {
 				executionPath: 'sys_trigger',
 				outcome: success ? 'completed' : 'script_failed',
 				runtimeIdentity: envelope.runtimeIdentity as ScriptRuntimeIdentity | undefined,
-				executionState: success ? 'completed' : 'failed',
+				executionState: envelope.success ? 'completed' : 'failed',
+				outputStatus: reassemblyError ? 'incomplete' : 'complete',
+				cleanupStatus,
+				...(cleanupStatus === 'incomplete'
+					? { cleanupRecords: { mailboxName: propKey, triggerName } }
+					: {}),
 				instanceName,
 				timings,
 			};

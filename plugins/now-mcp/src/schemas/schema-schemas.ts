@@ -164,6 +164,8 @@ export interface TableListItem {
 
 /** One field hit from a cross-table concept search (`sn_find_fields`). */
 export interface FieldSearchItem {
+	/** Owning table scope for ranking; unknown never earns a core bonus. */
+	scope?: string;
 	/** The table the field lives on. */
 	table: string;
 	/** The column name. */

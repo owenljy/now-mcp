@@ -20,7 +20,9 @@ export const ExecuteBackgroundScriptSchema = z.object({
 		.max(120000, 'Timeout cannot exceed 120000ms (2 minutes)')
 		.optional()
 		.default(60000)
-		.describe('Maximum execution time in milliseconds (default: 60000ms)'),
+		.describe(
+			'Operation deadline in milliseconds, including setup, HTTP and output reads (default: 60000ms). Cancellation/cleanup has a separate maximum 10000ms budget; a timeout does not prove the script did not execute.',
+		),
 	allowWrites: z
 		.boolean()
 		.optional()

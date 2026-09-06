@@ -686,7 +686,7 @@ export class SchemaService {
 		const target = this.resolveCacheTarget(instance);
 		const keywords = concept ? sanitizeKeywords(concept) : [];
 		const conceptKey = keywords.length > 0 ? keywords.join('|').toLowerCase() : 'none';
-		const cacheKey = `tables:v3:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}`;
+		const cacheKey = `tables:v4:${target.cacheNamespace}:${filter || 'all'}:${conceptKey}`;
 
 		// Check cache first
 		const cached = this.getFromCache<{
@@ -747,11 +747,10 @@ export class SchemaService {
 				'sys_scope.scope': string;
 			}>;
 		}>('/api/now/table/sys_db_object', {
-			sysparm_query: query,
+			sysparm_query: `${query}^ORDERBYname^ORDERBYsys_id`,
 			sysparm_fields: 'name,label,super_class.name,sys_scope.scope',
 			sysparm_limit: MAX_DISCOVERY_CANDIDATES,
 			sysparm_offset: 0,
-			sysparm_order_by: 'name',
 		});
 
 		const parsedTotal = Number.parseInt(headers['x-total-count'] ?? '', 10);
@@ -811,7 +810,7 @@ export class SchemaService {
 			return { fields: [], keywords, totalMatching: 0, candidateComplete: true };
 		}
 
-		const cacheKey = `findfields:v3:${target.cacheNamespace}:${keywords.join('|').toLowerCase()}`;
+		const cacheKey = `findfields:v4:${target.cacheNamespace}:${keywords.join('|').toLowerCase()}`;
 		const cached = this.getFromCache<{
 			fields: FieldSearchItem[];
 			keywords: string[];
@@ -857,18 +856,27 @@ export class SchemaService {
 				'reference.name': string;
 			}>;
 		}>('/api/now/table/sys_dictionary', {
-			sysparm_query: query,
+			sysparm_query: `${query}^ORDERBYname^ORDERBYelement^ORDERBYsys_id`,
 			sysparm_fields: 'name,element,column_label,internal_type,reference.name',
 			sysparm_limit: MAX_DISCOVERY_CANDIDATES,
 			sysparm_offset: 0,
-			sysparm_order_by: 'name',
 		});
 
 		const parsedTotal = Number.parseInt(headers['x-total-count'] ?? '', 10);
 		const totalMatching = Number.isFinite(parsedTotal) ? parsedTotal : null;
 
+		// One cached metadata window instead of one scope request per field/table.
+		// Tables outside the window remain unknown; never invent a core-scope bonus.
+		const scopes = new Map<string, string>();
+		try {
+			const owners = await this.listTables(undefined, MAX_DISCOVERY_CANDIDATES, target.name);
+			for (const owner of owners.tables) scopes.set(owner.name, owner.scope ?? 'global');
+		} catch {
+			/* Scope ranking is advisory; dictionary reads still work. */
+		}
 		const fields: FieldSearchItem[] = response.result.map((row) => ({
 			table: row.name,
+			scope: scopes.get(row.name) ?? 'unknown',
 			element: row.element,
 			label: row.column_label,
 			type: normalizeSNRef(row.internal_type) ?? '',

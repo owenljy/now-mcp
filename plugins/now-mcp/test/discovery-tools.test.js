@@ -26,6 +26,19 @@ const columnValue = (res, column, rowIndex = 0) => {
   return rows[rowIndex][columns.indexOf(column)];
 };
 
+test('field ranking demotes owner history tables and prefers a shorter base owner on a tie',async()=>{
+  const fields=['sysrule_escalate_history','sysrule_escalate_interval','task'].map(table=>({table,element:'escalation',label:'Escalation',type:'integer',scope:'global',matched:'escalat'}));
+  const result=await createFindFieldsTool(fieldsService({fields,totalMatching:3,candidateComplete:true})).handler({concept:['escalat'],limit:3});
+  assert.equal(columnValue(result,'table',0),'task');assert.equal(columnValue(result,'table',2),'sysrule_escalate_history');
+});
+
+test('exhausting a candidate window is distinct from exhausting all matches',async()=>{
+  const tool=createListTablesTool(tablesService({tables:[{name:'task'}],totalMatching:12000,candidateComplete:false}));
+  const result=await tool.handler({offset:0,limit:1});
+  assert.equal(result.structuredContent.pagination.hasMore,false);
+  assert.equal(result.structuredContent.pagination.moreMatchesOutsideWindow,true);
+});
+
 test('sn_list_tables returns rows in relevance order, not the instance name order', async () => {
   const tool = createListTablesTool(
     tablesService({

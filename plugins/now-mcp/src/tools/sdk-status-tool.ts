@@ -42,10 +42,9 @@ export function createSdkStatusTool(instanceManager: InstanceManager) {
 		...SDK_STATUS_TOOL,
 		handler: async () => {
 			try {
-				const version = getNowSdkVersion();
+				const [version, profiles] = await Promise.all([getNowSdkVersion(), listNowSdkProfiles()]);
 				const semver = parseSemVer(version);
 				const features = resolveFeatures(semver);
-				const profiles = listNowSdkProfiles();
 
 				const configured = instanceManager.listInstances().map((name) => ({
 					name,

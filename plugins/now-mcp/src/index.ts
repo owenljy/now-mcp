@@ -76,7 +76,7 @@ async function main() {
 		//     than in loadConfig. Best-effort; keeps the YAML default on any miss.
 		try {
 			const configured = im.listInstances().map((name) => ({ name, url: im.getConfig(name).url }));
-			const followTo = resolveNowSdkFollow(configured);
+			const followTo = await resolveNowSdkFollow(configured);
 			const previousDefault = im.getDefaultInstance();
 			const applied = im.completeDefaultAlignment(followTo ?? undefined);
 			if (applied && followTo && followTo !== previousDefault) {

@@ -754,6 +754,25 @@ test('listTables reports the total match count and fetches a stable candidate wi
 	assert.equal(totalMatching, 417);
 	assert.equal(client.state.params.sysparm_offset, 0);
 	assert.equal(client.state.params.sysparm_limit, 10_000);
+	assert.match(client.state.params.sysparm_query, /\^ORDERBYname\^ORDERBYsys_id$/);
+	assert.equal(client.state.params.sysparm_order_by, undefined);
+});
+
+test('findFields uses deterministic remote ordering and owning-table scopes', async () => {
+  const calls=[];
+  const client={async getWithHeaders(endpoint,params){
+    calls.push({endpoint,params});
+    const result=endpoint.endsWith('sys_dictionary')
+      ? [{name:'task',element:'escalation',column_label:'Escalation',internal_type:'integer'},
+         {name:'x_acme_history',element:'escalation',column_label:'Escalation',internal_type:'integer'}]
+      : [{name:'task',label:'Task','sys_scope.scope':'global'},{name:'x_acme_history',label:'History','sys_scope.scope':'x_acme'}];
+    return {data:{result},headers:{'x-total-count':'2'}};
+  }};
+  const svc=new SchemaService(makeManager(client,{name:'field-owner-order'}));
+  const result=await svc.findFields(['escalat']);
+  assert.match(calls[0].params.sysparm_query,/\^ORDERBYname\^ORDERBYelement\^ORDERBYsys_id$/);
+  assert.deepEqual(result.fields.map(f=>f.scope),['global','x_acme']);
+  await svc.findFields(['escalat']);assert.equal(calls.length,2,'both field candidates and owner metadata are cached');
 });
 
 test('listTables reports totalMatching as null when the instance omits the header', async () => {

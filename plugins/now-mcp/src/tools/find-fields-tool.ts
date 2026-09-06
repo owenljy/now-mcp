@@ -73,13 +73,20 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 					fields.map((f) => ({
 						...f,
 						name: f.element,
+						structuralName: f.table,
 						stableKey: `${f.table}\u0000${f.element}\u0000${f.label}`,
 					})),
 					terms,
 				).map((r) => {
 					// Drop the synthetic `name` again so the wire shape is unchanged —
 					// rows stay {table, element, label, type, reference, matched}.
-					const { name: _ranking, stableKey: _stableKey, ...row } = r.item;
+					const {
+						name: _ranking,
+						stableKey: _stableKey,
+						structuralName: _owner,
+						scope: _scope,
+						...row
+					} = r.item;
 					return row;
 				});
 				const ranked = allRanked.slice(validated.offset, validated.offset + validated.limit);
@@ -116,6 +123,7 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 						hasMore,
 						candidateCount: allRanked.length,
 						rankingComplete: candidateComplete,
+						moreMatchesOutsideWindow: !candidateComplete,
 						...(hasMore ? { nextOffset } : {}),
 						...(totalMatching !== null ? { totalMatching } : {}),
 					},
@@ -143,7 +151,7 @@ export function createFindFieldsTool(schemaService: SchemaService) {
 
 				// Zero results mean the keywords missed, not that the field is absent —
 				// say so here, where it can still change the next call.
-				if (renderedRows.length === 0) {
+				if (allRanked.length === 0) {
 					response.hints = [
 						`No field label or column name matched ${JSON.stringify(validated.concept)}. Try different vocabulary before concluding the field does not exist.`,
 						'Try shorter word stems (escalat rather than escalation), and if the concept came from non-English input, translate it to English first — labels are English unless a language plugin is active.',

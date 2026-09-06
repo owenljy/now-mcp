@@ -2,6 +2,34 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { NetworkError, ServiceNowError } from '../build/types/errors.js';
 import { shouldFallbackToNowSdkQuery, TableService } from '../build/services/table-service.js';
+import { runWithOperationContext } from '../build/utils/operation-context.js';
+
+test('MCP operation cancellation reaches the asynchronous SDK fallback',async()=>{
+  const controller=new AbortController();const reason=new Error('MCP cancelled');let entered;
+  const ready=new Promise(r=>{entered=r;});
+  const config={name:'dev',url:'https://dev.service-now.com'};
+  const manager={resolveInstance:()=>({name:'dev',config,client:{getWithHeaders:async()=>{throw new ServiceNowError('REST disabled',403);}}})};
+  const service=new TableService(manager,{getTableAccessProfile:async()=>({exists:true,wsAccess:false})},async(url,table,options)=>{
+    assert.equal(options.signal,controller.signal);entered();
+    return new Promise((resolve,reject)=>options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true}));
+  });
+  const pending=runWithOperationContext({operationId:'test',instance:'dev',tool:'sn_query_records',signal:controller.signal},()=>service.queryRecordsWithMeta('incident',{allowNowSdkFallback:true}));
+  const rejected=assert.rejects(pending,e=>e===reason);await ready;controller.abort(reason);await rejected;
+});
+
+test('async fallback receives the explicit profile and preserves the original status with safe failure details',async()=>{
+  const error=new ServiceNowError('REST disabled',403,undefined,'ACCESS_DENIED');
+  const config={name:'dev',url:'https://dev.service-now.com',nowSdkProfile:'chosen'};
+  const manager={resolveInstance:()=>({name:'dev',config,client:{getWithHeaders:async()=>{throw error;}}})};
+  const service=new TableService(manager,{getTableAccessProfile:async()=>({exists:true,wsAccess:false})},async(url,table,options)=>{
+    assert.equal(options.authProfile,'chosen');await new Promise(r=>setImmediate(r));
+    return {ok:false,reason:'selected now-sdk profile authentication failed'};
+  });
+  await assert.rejects(service.queryRecordsWithMeta('incident',{allowNowSdkFallback:true}),caught=>{
+    assert.equal(caught,error);assert.equal(caught.toJSON().error.statusCode,403);
+    assert.match(caught.toJSON().error.fallbackFailure.reason,/authentication failed/);return true;
+  });
+});
 
 /**
  * A stub ServiceNow client that records every call (endpoint + params/body)

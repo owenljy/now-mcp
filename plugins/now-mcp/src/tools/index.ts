@@ -89,7 +89,8 @@ function withLogging(
 	lowLevelServer: Server,
 	instanceManager: InstanceManager,
 ): (args: unknown, extra: unknown) => Promise<ToolResult> {
-	return async (args: unknown): Promise<ToolResult> => {
+	return async (args: unknown, extra: unknown): Promise<ToolResult> => {
+		const signal = (extra as { signal?: AbortSignal } | undefined)?.signal;
 		const operationId = randomUUID();
 		const selector =
 			args &&
@@ -110,7 +111,7 @@ function withLogging(
 			operationId,
 		});
 
-		return runWithOperationContext({ operationId, instance, tool: name }, async () => {
+		return runWithOperationContext({ operationId, instance, tool: name, signal }, async () => {
 			const start = Date.now();
 			try {
 				const result = await handler(handlerArgs, lowLevelServer);

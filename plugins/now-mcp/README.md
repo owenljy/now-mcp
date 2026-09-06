@@ -299,6 +299,12 @@ continues without re-ranking a different server page; `rankingComplete:false`
 means the match set exceeded the candidate window and should be narrowed before
 treating the order or field distribution as global.
 
+The server-side window uses encoded-query `ORDERBY` clauses with a unique final
+key. Field ranking also considers the owning table's scope, history/staging
+status, and (on a semantic tie) shorter base-table names. Owner scopes outside
+the cached metadata window remain unknown. `moreMatchesOutsideWindow` separates
+an exhausted candidate window from an exhausted complete match set.
+
 `sn_find_fields` always excludes Flow Designer's per-flow variable-pool tables
 (`var__m_*`). Measured on a live instance, searching field labels for
 `escalat` returns 166 rows unfiltered and 50 with the exclusion — and the noise
@@ -344,6 +350,27 @@ Two consequences worth knowing:
   perform the write.
 
 ### Execution & files
+
+In 2.1.2, background-script mailbox chunks preserve Unicode boundaries and carry
+a length plus checksum. `executionState` describes whether the script completed;
+`outputStatus: "incomplete"` means its output failed integrity/persistence checks,
+even if the script completed successfully. Do not rerun a mutation just to recover
+missing output. `complete` means the retained payload passed integrity checks;
+`outputTruncated:true` can still indicate an intentional size cap. Older mailbox
+envelopes remain readable.
+
+Temporary properties use `ignore_cache:true`. Cleanup deletes at most four records
+concurrently and has a separate 10-second budget. `timeout` bounds setup, requests,
+polling and payload reads; cleanup may add up to 10 seconds. `cleanupStatus` reports
+completion, with exact `cleanupRecords` names when incomplete. A lost creation
+response is reconciled by the execution's unique name; uncertain errors retain
+their reconciliation details. A timeout or lost response never proves that a
+submitted script had no side effects.
+
+Output capture rewrites parsed logging calls, preserving strings, comments and
+regular expressions. A script that cannot be parsed safely is rejected before
+creating a mailbox or trigger.
+
 | Tool | What it does |
 |---|---|
 | `sn_execute_background_script` | Run server-side JavaScript; reports transport path/outcome and supports a JSON application-result contract |
@@ -411,6 +438,19 @@ Successful fallback responses identify `transport: "now-sdk-query"`,
 the independent profile. The host check fails closed so recovery cannot silently
 query another environment. Writes and aggregate calls never fall back to the
 CLI.
+
+Set `nowSdkProfile: your-alias` on the instance in YAML, or
+`SERVICENOW_NOW_SDK_PROFILE=your-alias` for the single-instance environment setup,
+to bind the fallback identity explicitly. Without a binding, exactly one profile
+must match the host; multiple matches produce an actionable diagnostic, without
+trying identities in sequence. Failed recovery preserves the original HTTP error
+and adds classified `error.fallbackFailure.reason`; CLI output and credentials
+are not echoed. This binding does not change the CLI's active profile.
+
+SDK version/profile probes and queries run asynchronously, with shared in-flight
+probes, bounded process output, timeouts and cancellation support. Config parsing
+uses the last explicit default (or first instance when none is marked); optional
+SDK default alignment happens after startup without blocking the MCP event loop.
 
 ### Auto-pairing the instance
 By default (`SERVICENOW_FOLLOW_NOW_SDK` on), the active instance follows whichever

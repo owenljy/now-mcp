@@ -61,6 +61,7 @@ const InstanceConfigSchema = z
 			),
 		readOnly: z.boolean().default(true), // Default to true for safety
 		scriptApiPath: z.string().optional(),
+		nowSdkProfile: z.string().trim().min(1).max(128).optional(),
 	})
 	.superRefine((cfg, ctx) => {
 		// The OAuth password (Resource Owner) grant needs a user identity.
@@ -91,26 +92,10 @@ const MultiInstanceConfigSchema = z
 		const defaults = data.instances.filter((i) => i.default);
 		if (defaults.length === 1) return data;
 
-		// 0 or 2+ defaults — use now-sdk's active instance as the tiebreaker.
-		let winner: string | null = null;
-		let reason = '';
-
-		if (isNowSdkAvailable()) {
-			const profile = resolveProfile();
-			if (profile) {
-				const matched = findInstanceByHost(data.instances, profile.host);
-				if (matched) {
-					winner = matched;
-					reason = ` (matched now-sdk active profile '${profile.alias}')`;
-				}
-			}
-		}
-
-		if (!winner) {
-			// Fallback: last explicit default wins, or first instance when none set.
-			winner = defaults.length > 1 ? defaults[defaults.length - 1].name : data.instances[0].name;
-			reason = defaults.length > 1 ? ' (last explicit default)' : ' (first instance)';
-		}
+		// Config parsing must not spawn a process. SDK alignment happens asynchronously after startup.
+		const winner =
+			defaults.length > 1 ? defaults[defaults.length - 1].name : data.instances[0].name;
+		const reason = defaults.length > 1 ? ' (last explicit default)' : ' (first instance)';
 
 		logger.warn(
 			`Config has ${defaults.length} default instance(s); auto-selecting '${winner}'${reason}. ` +
@@ -242,9 +227,9 @@ export function reloadYamlConfig(configPath: string): Environment {
  * (or 0/no/off). Returns null (no switch) when the flag is off, now-sdk is
  * absent, there's no default profile, or no instance matches its host.
  */
-export function resolveNowSdkFollow(
+export async function resolveNowSdkFollow(
 	instances: Array<{ name: string; url: string }>,
-): string | null {
+): Promise<string | null> {
 	const flag = process.env.SERVICENOW_FOLLOW_NOW_SDK;
 	if (flag !== undefined && /^(0|false|no|off)$/i.test(flag.trim())) {
 		return null;
@@ -254,7 +239,7 @@ export function resolveNowSdkFollow(
 		logger.debug('follow-now-sdk: now-sdk not on PATH; using the YAML default.');
 		return null;
 	}
-	const profile = resolveProfile();
+	const profile = await resolveProfile();
 	if (!profile) {
 		logger.debug('follow-now-sdk: no default now-sdk auth profile found; using the YAML default.');
 		return null;
@@ -351,7 +336,14 @@ function buildSingleInstanceFromEnv(): Environment | null {
 
 	const candidate = {
 		instances: [
-			{ name, url, auth: { type: 'basic', username, password }, default: true, readOnly },
+			{
+				name,
+				url,
+				auth: { type: 'basic', username, password },
+				default: true,
+				readOnly,
+				nowSdkProfile: envValue('SERVICENOW_NOW_SDK_PROFILE'),
+			},
 		],
 	};
 

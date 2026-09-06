@@ -297,6 +297,9 @@ export function createExecuteBackgroundScriptTool(
 					executionPath: result.executionPath,
 					outcome: result.outcome,
 					...(result.executionState ? { executionState: result.executionState } : {}),
+					...(result.outputStatus ? { outputStatus: result.outputStatus } : {}),
+					...(result.cleanupStatus ? { cleanupStatus: result.cleanupStatus } : {}),
+					...(result.cleanupRecords ? { cleanupRecords: result.cleanupRecords } : {}),
 					...(result.runtimeIdentity
 						? { runtimeContext: { observedIdentity: result.runtimeIdentity } }
 						: {}),

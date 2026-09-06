@@ -114,6 +114,7 @@ export function createListTablesTool(schemaService: SchemaService) {
 						hasMore,
 						candidateCount: allRanked.length,
 						rankingComplete: candidateComplete,
+						moreMatchesOutsideWindow: !candidateComplete,
 						...(hasMore ? { nextOffset } : {}),
 						...(totalMatching !== null ? { totalMatching } : {}),
 					},
@@ -144,7 +145,7 @@ export function createListTablesTool(schemaService: SchemaService) {
 				// A concept search that finds nothing means the keywords were wrong,
 				// not that the table is absent — say so at the point of failure, where
 				// it can still change the next call.
-				if (renderedRows.length === 0 && validated.concept) {
+				if (allRanked.length === 0 && validated.concept) {
 					response.hints = [
 						`No table label or name matched ${JSON.stringify(validated.concept)}. Try different vocabulary before concluding the table does not exist — platform naming often diverges from the user's wording (chat → conversation/messaging/interaction, ticket → incident/task/case).`,
 						'Try shorter word stems (escalat rather than escalation), and if the concept came from non-English input, translate it to English first — labels are English unless a language plugin is active.',

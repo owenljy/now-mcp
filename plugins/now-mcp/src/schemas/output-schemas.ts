@@ -362,6 +362,9 @@ export const ExecuteScriptOutputSchema = z.object({
 	executionPath: z.enum(['scripted-rest', 'sys_trigger']).optional(),
 	outcome: z.enum(['completed', 'script_failed', 'timed_out']).optional(),
 	executionState: z.enum(['completed', 'failed', 'unknown_after_timeout']).optional(),
+	outputStatus: z.enum(['complete', 'incomplete']).optional(),
+	cleanupStatus: z.enum(['complete', 'incomplete']).optional(),
+	cleanupRecords: z.object({ mailboxName: z.string(), triggerName: z.string() }).optional(),
 	// Slimmed to just the observed identity — identityNote/writeResultContract
 	// were static prose, moved into the tool description. Omitted entirely when
 	// the transport didn't report an identity.

@@ -3,6 +3,8 @@
  */
 
 export class ServiceNowError extends Error {
+	/** Safe classified diagnostics for an attempted independent read recovery. */
+	fallbackFailure?: { reason: string };
 	constructor(
 		message: string,
 		public statusCode?: number,
@@ -23,6 +25,7 @@ export class ServiceNowError extends Error {
 				code: this.code,
 				statusCode: this.statusCode,
 				details: this.servicenowError,
+				...(this.fallbackFailure ? { fallbackFailure: this.fallbackFailure } : {}),
 			},
 			isError: true,
 		};

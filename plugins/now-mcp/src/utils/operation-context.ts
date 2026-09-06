@@ -4,6 +4,8 @@ export interface OperationContext {
 	operationId: string;
 	instance: string;
 	tool: string;
+	/** MCP request cancellation, propagated to asynchronous native/SDK reads. */
+	signal?: AbortSignal;
 }
 
 const storage = new AsyncLocalStorage<OperationContext>();
